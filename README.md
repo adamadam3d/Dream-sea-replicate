@@ -1,1 +1,53 @@
-"# Dream-sea-replicate" 
+# DreamSea
+
+DreamSea is a generative model pipeline designed to create photorealistic 3D underwater terrains from unannotated 2D RGB imagery, based on the concepts from the paper *Infinite Leagues Under the Sea* by Zhang et al.
+
+## Architecture
+
+The pipeline consists of several modular steps that convert standard 2D RGB imagery into a rich 3D representation using advanced generative modeling techniques:
+
+1. **Data Preprocessing**:
+   - **Depth Estimation**: Uses Depth Anything v2 to generate relative depth maps from RGB images, concatenating them into 4-channel RGBD tensors.
+   - **Feature Extraction**: Uses DINOv2 to extract zero-shot semantic features.
+   - **Dimensionality Reduction**: Applies PCA via scikit-learn to reduce the DINOv2 embeddings to 2 principal components.
+
+2. **Diffusion Models**:
+   - **Conditional DDPM**: A Custom U-Net model trained on 4-channel RGBD data, conditioned on the 2D PCA-reduced DINOv2 features via Cross-Attention layers.
+   - **Unconditional DDPM**: A standard U-Net model trained on the same data without any conditioning.
+
+3. **Fractal Latent Field Generation**:
+   - Implements the Diamond-Square algorithm to recursively generate a 2D grid of spatial latent embeddings (representing the 2D PCA space).
+
+4. **Generation & Inpainting (RePaint)**:
+   - Evaluates the Conditional DDPM over the generated fractal latent grid to create individual RGBD patches.
+   - Stitches these adjacent spatial patches into a dense, global RGBD map using the RePaint framework. The Unconditional DDPM is used with a parallelizable inpainting pattern to seamlessly fill the overlaps.
+
+5. **3D Gaussian Splatting (3DGS) Optimization**:
+   - Unprojects the final stitched RGBD map into a dense 3D Point Cloud.
+   - Initializes a 3D Gaussian Splatting model. The 3D positions of the Gaussians are explicitly frozen to prevent memory overflow.
+   - Optimizes the appearance parameters (scaling, rotation, opacity, and spherical harmonic colors) using Score Distillation Sampling (SDS) loss from the 2D diffusion priors.
+
+## Requirements
+
+Due to the memory-intensive nature of both Denoising Diffusion Probabilistic Models (especially during RePaint inpainting on potentially high-resolution canvases) and 3D Gaussian Splatting, this pipeline requires a robust GPU setup.
+
+### Hardware
+- **GPU**: At least one NVIDIA GPU with 24GB+ VRAM (e.g., RTX 3090, RTX 4090, A10G, or A100).
+- **System RAM**: 64GB+ recommended to hold the dataset and point cloud operations comfortably.
+
+### Software dependencies
+- Python 3.10+
+- PyTorch (with CUDA)
+- Hugging Face `transformers`
+- Hugging Face `diffusers`
+- `numpy`, `scikit-learn`, `Pillow`, `torchvision`
+
+## Usage
+
+To run a dummy end-to-end integration test of the pipeline (verifying that all the components load, connect, and optimize without crashing):
+
+```bash
+PYTHONPATH=. python dreamsea/main.py
+```
+
+This will run an abbreviated version of the generation, stitching, and 3DGS optimization steps on a tiny grid footprint.
