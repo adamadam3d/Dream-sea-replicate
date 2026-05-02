@@ -2,7 +2,15 @@
 
 DreamSea is a generative model pipeline designed to create photorealistic 3D underwater terrains from unannotated 2D RGB imagery, based on the concepts from the paper *Infinite Leagues Under the Sea* by Zhang et al.
 
-## Architecture
+## Documentation
+
+For comprehensive documentation, please refer to the following guides:
+
+- [**Installation Guide**](docs/INSTALLATION.md): Hardware prerequisites and step-by-step setup instructions.
+- [**Usage Guide**](docs/USAGE.md): How to run the pipeline, start training, and interact with individual modules.
+- [**Architecture Overview**](docs/ARCHITECTURE.md): Detailed explanation of the pipeline's technical design (Preprocessing, Diffusion, Fractal Latents, RePaint, 3DGS & SDS).
+
+## Architecture Overview
 
 The pipeline consists of several modular steps that convert standard 2D RGB imagery into a rich 3D representation using advanced generative modeling techniques:
 
@@ -42,7 +50,7 @@ Due to the memory-intensive nature of both Denoising Diffusion Probabilistic Mod
 - Hugging Face `diffusers`
 - `numpy`, `scikit-learn`, `Pillow`, `torchvision`
 
-## Usage
+## Quick Start
 
 To run a dummy end-to-end integration test of the pipeline (verifying that all the components load, connect, and optimize without crashing):
 
@@ -50,4 +58,4 @@ To run a dummy end-to-end integration test of the pipeline (verifying that all t
 PYTHONPATH=. python dreamsea/main.py
 ```
 
-This will run an abbreviated version of the generation, stitching, and 3DGS optimization steps on a tiny grid footprint.
+This will run an abbreviated version of the generation, stitching, and 3DGS optimization steps on a tiny grid footprint. For more detailed usage instructions, please see the [Usage Guide](docs/USAGE.md).
