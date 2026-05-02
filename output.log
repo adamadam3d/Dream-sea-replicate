@@ -1,0 +1,6 @@
+Running DreamSea End-to-End Pipeline Prototype...
+
+--- 1. Testing Preprocessing Components ---
+Loading weights:   0%|          | 0/287 [00:00<?, ?it/s]Loading weights:  68%|██████▊   | 196/287 [00:00<00:00, 1959.34it/s]Loading weights: 100%|██████████| 287/287 [00:00<00:00, 2384.89it/s]
+Warning: You are sending unauthenticated requests to the HF Hub. Please set a HF_TOKEN to enable higher rate limits and faster downloads.
+Loading weights:   0%|          | 0/223 [00:00<?, ?it/s]Loading weights:  67%|██████▋   | 149/223 [00:00<00:00, 1488.53it/s]Loading weights: 100%|██████████| 223/223 [00:00<00:00, 1670.21it/s]
