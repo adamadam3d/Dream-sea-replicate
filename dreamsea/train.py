@@ -2,7 +2,7 @@ import torch
 import torch.nn.functional as F
 from diffusers import DDPMScheduler
 from torch.utils.data import DataLoader, Dataset
-from .models import ConditionalDDPM, UnconditionalDDPM
+from dreamsea.models import ConditionalDDPM, UnconditionalDDPM
 
 class DummyDataset(Dataset):
     """A dummy dataset to allow testing of the training loop."""
