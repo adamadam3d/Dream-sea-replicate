@@ -27,27 +27,13 @@ The default script sets up a dummy dataset and runs a mock training loop to veri
 PYTHONPATH=. python dreamsea/train.py
 ```
 
-### Preparing for Real-World Training
+### Real-World Training
 
-To train the models to a useful point, you must perform several extensive data preparation and tuning steps:
+To effectively train the models, follow these essential steps:
 
-#### 1. Dataset Preparation
-- **Collect Data**: Gather thousands of high-quality underwater RGB images.
-- **Preprocess**: You must pass every image through the `DataPreprocessor` (see section below).
-  - Save the resulting 4-channel RGBD tensors to disk (e.g., as `.pt` or `.npy` files).
-  - Save the corresponding 2D PCA-reduced DINOv2 feature vectors.
-- **Custom DataLoader**: Replace the `DummyDataset` in `train.py` with a PyTorch `Dataset` that streams your precomputed RGBD tensors and conditions from disk.
-
-#### 2. Hyperparameter Tuning
-A dummy run trains for 5 epochs with a learning rate of `1e-4`. To achieve meaningful results:
-- **Epochs**: Increase the number of epochs significantly (e.g., 500 - 1000+).
-- **Batch Size**: Maximize your batch size based on your VRAM (e.g., 16, 32, or 64). If VRAM is limited, use gradient accumulation.
-- **Timesteps**: `num_train_timesteps` is set to 1000. You may experiment with cosine vs linear schedules.
-
-#### 3. Monitoring and Checkpointing
-- **Loss Logging**: Integrate a logging framework like Weights & Biases (`wandb`) or TensorBoard to track the MSE loss over time.
-- **Checkpoints**: Add code within the training loop to periodically save the `state_dict` of both the `cond_model` and `uncond_model` to disk (e.g., `torch.save(cond_model.state_dict(), f"checkpoints/cond_epoch_{epoch}.pt")`).
-- **Validation**: It is highly recommended to add a validation loop that periodically samples an image using the DDPM to visually track generation quality.
+- **Data Preparation**: Use `DataPreprocessor` to convert RGB images to RGBD tensors and DINOv2 conditions, then stream these from disk using a custom PyTorch `Dataset` instead of `DummyDataset`.
+- **Tuning**: Increase epochs to 500+ and maximize your batch size. Use gradient accumulation if VRAM is constrained.
+- **Tracking & Checkpoints**: Use `wandb` or TensorBoard to track loss, save `.pt` model checkpoints periodically, and generate sample images to validate visual quality.
 
 ## Interacting with Individual Modules
 
