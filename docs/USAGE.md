@@ -29,11 +29,33 @@ PYTHONPATH=. python dreamsea/train.py
 
 ### Real-World Training
 
-To effectively train the models, follow these essential steps:
+To effectively train the models, you have two options:
 
-- **Data Preparation**: Use `DataPreprocessor` to convert RGB images to RGBD tensors and DINOv2 conditions, then stream these from disk using a custom PyTorch `Dataset` instead of `DummyDataset`.
-- **Tuning**: Increase epochs to 500+ and maximize your batch size. Use gradient accumulation if VRAM is constrained.
-- **Tracking & Checkpoints**: Use `wandb` or TensorBoard to track loss, save `.pt` model checkpoints periodically, and generate sample images to validate visual quality.
+#### Option A: One-Step Simple Training (For Beginners)
+
+Instead of managing data preprocessing and training separately, you can write a simple PyTorch `Dataset` that takes a folder of RGB images, initializes the `DataPreprocessor`, and dynamically computes the RGBD tensors and DINOv2 conditions on the fly during the training loop. Set your epochs to 500+ and simply save the model state dict at the end of the script.
+
+*Note: This approach is significantly slower because it runs foundation model inference (Depth Anything and DINOv2) on every single image, every single epoch.*
+
+#### Option B: Advanced Individual Steps (Recommended for Performance)
+
+To train the models to a useful point efficiently, perform these steps individually:
+
+1. **Dataset Preparation**
+   - **Preprocess**: Pass every image through the `DataPreprocessor` once.
+     - Save the resulting 4-channel RGBD tensors to disk (e.g., as `.pt` or `.npy` files).
+     - Save the corresponding 2D PCA-reduced DINOv2 feature vectors.
+   - **Custom DataLoader**: Replace the `DummyDataset` with a PyTorch `Dataset` that quickly streams your precomputed tensors from disk.
+
+2. **Hyperparameter Tuning**
+   - **Epochs**: Increase the number of epochs significantly (e.g., 500 - 1000+).
+   - **Batch Size**: Maximize your batch size based on your VRAM (e.g., 16, 32, or 64). If VRAM is limited, use gradient accumulation.
+   - **Timesteps**: `num_train_timesteps` is set to 1000. You may experiment with cosine vs linear schedules.
+
+3. **Monitoring and Checkpointing**
+   - **Loss Logging**: Integrate a logging framework like Weights & Biases (`wandb`) or TensorBoard to track the MSE loss over time.
+   - **Checkpoints**: Add code to periodically save the `state_dict` of both models to disk (e.g., `torch.save(cond_model.state_dict(), f"checkpoints/cond_epoch_{epoch}.pt")`).
+   - **Validation**: Add a validation loop that periodically samples an image using the DDPM to visually track generation quality.
 
 ## Interacting with Individual Modules
 
