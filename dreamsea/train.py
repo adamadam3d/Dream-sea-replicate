@@ -29,6 +29,16 @@ class PreprocessedDataset(Dataset):
         rgbd_path = self.rgbd_files[idx]
         image = torch.load(rgbd_path)
         
+        # The preprocessor saved tensors as [1, 4, H, W]
+        # We need to squeeze out all leading 1s to get [4, H, W]
+        while image.dim() > 3 and image.shape[0] == 1:
+            image = image.squeeze(0)
+            
+        # The UNet is initialized with sample_size=224, so we need to resize
+        # the inputs to 224x224, otherwise they will be too large and cause dimension errors or OOM.
+        if image.shape[-2:] != (224, 224):
+            image = F.interpolate(image.unsqueeze(0), size=(224, 224), mode='bilinear', align_corners=False).squeeze(0)
+        
         if self.conditional:
             # Load corresponding condition vector
             base_name = rgbd_path.name.replace("_rgbd.pt", "")
