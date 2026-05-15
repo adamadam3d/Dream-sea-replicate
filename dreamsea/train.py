@@ -1,54 +1,82 @@
+import os
+import argparse
+from pathlib import Path
 import torch
 import torch.nn.functional as F
 from diffusers import DDPMScheduler
 from torch.utils.data import DataLoader, Dataset
 from dreamsea.models import ConditionalDDPM, UnconditionalDDPM
 
-class DummyDataset(Dataset):
-    """A dummy dataset to allow testing of the training loop."""
-    def __init__(self, num_samples=100, conditional=True):
-        self.num_samples = num_samples
+class PreprocessedDataset(Dataset):
+    """Loads preprocessed RGBD tensors and condition vectors from disk."""
+    def __init__(self, data_dir, conditional=True):
+        self.data_dir = Path(data_dir)
         self.conditional = conditional
+        
+        # Get list of all rgbd files
+        rgbd_dir = self.data_dir / "rgbd"
+        if not rgbd_dir.exists():
+            raise FileNotFoundError(f"RGBD directory not found at {rgbd_dir}")
+            
+        self.rgbd_files = list(rgbd_dir.glob("*.pt"))
+        if len(self.rgbd_files) == 0:
+            raise ValueError(f"No .pt files found in {rgbd_dir}")
 
     def __len__(self):
-        return self.num_samples
+        return len(self.rgbd_files)
 
     def __getitem__(self, idx):
-        # 4-channel RGBD images of size 224x224
-        image = torch.randn(4, 224, 224)
+        rgbd_path = self.rgbd_files[idx]
+        image = torch.load(rgbd_path)
+        
         if self.conditional:
-            # 2D PCA reduced feature
-            condition = torch.randn(1, 2)
+            # Load corresponding condition vector
+            base_name = rgbd_path.name.replace("_rgbd.pt", "")
+            cond_path = self.data_dir / "conditions" / f"{base_name}_cond.pt"
+            condition = torch.load(cond_path)
+            # Squeeze to ensure it's a 1D tensor of size 2 instead of (1, 2)
+            condition = condition.squeeze()
             return image, condition
+            
         return image
 
+def train_ddpm(data_dir, model_type='conditional', epochs=500, batch_size=16, 
+               checkpoint_dir='checkpoints', save_every=50, device='cuda' if torch.cuda.is_available() else 'cpu'):
+    """
+    Training loop for DDPM models using preprocessed data.
+    """
+    # Create checkpoint directory if it doesn't exist
+    os.makedirs(checkpoint_dir, exist_ok=True)
 
-def train_ddpm(model_type='conditional', epochs=2000, batch_size=12, device='cuda' if torch.cuda.is_available() else 'cpu'):
-    """
-    Training loop for DDPM models.
-    """
     if model_type == 'conditional':
         model = ConditionalDDPM().to(device)
-        dataset = DummyDataset(conditional=True)
+        dataset = PreprocessedDataset(data_dir, conditional=True)
     elif model_type == 'unconditional':
         model = UnconditionalDDPM().to(device)
-        dataset = DummyDataset(conditional=False)
+        dataset = PreprocessedDataset(data_dir, conditional=False)
     else:
         raise ValueError("model_type must be 'conditional' or 'unconditional'")
 
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=True)
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
     noise_scheduler = DDPMScheduler(num_train_timesteps=1000)
 
     model.train()
-    print(f"Starting training for {model_type} DDPM for {epochs} epochs...")
+    print(f"Starting training for {model_type} DDPM on {device}...")
+    print(f"Dataset size: {len(dataset)} images")
+    print(f"Batch size: {batch_size}, Epochs: {epochs}")
+    print(f"Checkpoints will be saved to '{checkpoint_dir}' every {save_every} epochs.\n")
 
     for epoch in range(epochs):
+        epoch_loss = 0.0
         for step, batch in enumerate(dataloader):
             if model_type == 'conditional':
                 clean_images, conditions = batch
                 clean_images = clean_images.to(device)
-                conditions = conditions.to(device)
+                
+                # The model expects conditions of shape (batch, seq_len, embed_dim)
+                # Ensure conditions are (batch, 1, 2)
+                conditions = conditions.view(clean_images.shape[0], 1, 2).to(device)
             else:
                 clean_images = batch.to(device)
 
@@ -75,9 +103,39 @@ def train_ddpm(model_type='conditional', epochs=2000, batch_size=12, device='cud
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
+            
+            epoch_loss += loss.item()
 
-        if (epoch + 1) % 100 == 0:
-            print(f"Epoch {epoch + 1}/{epochs} | Loss: {loss.item():.4f}")
+        avg_loss = epoch_loss / len(dataloader)
+        print(f"Epoch {epoch + 1}/{epochs} | Avg Loss: {avg_loss:.4f}")
 
-    print("Training complete.")
+        # Checkpointing
+        if (epoch + 1) % save_every == 0 or (epoch + 1) == epochs:
+            checkpoint_path = os.path.join(checkpoint_dir, f"{model_type}_epoch_{epoch+1}.pt")
+            torch.save(model.state_dict(), checkpoint_path)
+            print(f"--> Saved checkpoint: {checkpoint_path}")
+
+    print("\nTraining complete.")
     return model
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Train DreamSea DDPM models.")
+    parser.add_argument("--data_dir", type=str, required=True, help="Directory containing preprocessed 'rgbd' and 'conditions' folders.")
+    parser.add_argument("--model_type", type=str, choices=['conditional', 'unconditional'], default='conditional', help="Which model to train.")
+    parser.add_argument("--epochs", type=int, default=500, help="Number of training epochs.")
+    parser.add_argument("--batch_size", type=int, default=16, help="Training batch size.")
+    parser.add_argument("--checkpoint_dir", type=str, default="checkpoints", help="Directory to save checkpoints.")
+    parser.add_argument("--save_every", type=int, default=50, help="Save a checkpoint every N epochs.")
+    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Compute device.")
+
+    args = parser.parse_args()
+
+    train_ddpm(
+        data_dir=args.data_dir,
+        model_type=args.model_type,
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        checkpoint_dir=args.checkpoint_dir,
+        save_every=args.save_every,
+        device=args.device
+    )
