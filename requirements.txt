@@ -1,0 +1,18 @@
+# Core Machine Learning
+torch
+torchvision
+torchaudio
+transformers
+diffusers
+accelerate
+
+# Data Processing & Math
+numpy
+scikit-learn
+Pillow
+scipy
+
+# Utilities
+tqdm
+packaging
+pathlib
