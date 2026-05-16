@@ -5,7 +5,7 @@ from diffusers import DDPMScheduler
 import dreamsea.gs_sds_optimization as gs_opt
 from dreamsea.models import UnconditionalDDPM
 
-def test_3dgs(device):
+def test_3dgs(device="cuda" if torch.cuda.is_available() else "cpu"):
     print(f"Testing 3DGS and SDS optimization on {device}...")
 
     # 1. Create a dummy RGBD map
