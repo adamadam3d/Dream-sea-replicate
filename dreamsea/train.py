@@ -185,6 +185,7 @@ if __name__ == "__main__":
     parser.add_argument("--resume_from", type=str, default=None, help="Path to a checkpoint .pt file to resume training from.")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Compute device.")
     parser.add_argument("--multi_gpu", action="store_true", help="Enable multi-GPU training if multiple GPUs are available.")
+    parser.add_argument("--gradient_checkpointing", action="store_true", help="Enable to drastically reduce VRAM usage at the cost of speed.")
 
     args = parser.parse_args()
 
@@ -200,5 +201,6 @@ if __name__ == "__main__":
         save_every=args.save_every,
         resume_from=args.resume_from,
         device=args.device,
-        multi_gpu=args.multi_gpu
-    )
+        multi_gpu=args.multi_gpu,
+        gradient_checkpointing=args.gradient_checkpointing
+    )    )
