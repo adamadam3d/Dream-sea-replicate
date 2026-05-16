@@ -102,6 +102,11 @@ def train_ddpm(data_dir, model_type='conditional', epochs=500, batch_size=16,
         accelerator.print(f"Warning: Checkpoint not found at {resume_from}. Starting from scratch.")
 
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=True)
+
+    # Bug fix: Ensure the dataloader has at least one batch to prevent ZeroDivisionError later
+    if len(dataloader) == 0:
+        raise ValueError(f"Dataset size ({len(dataset)}) is smaller than the batch size ({batch_size}) with drop_last=True. Please decrease batch_size or add more data.")
+
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
     noise_scheduler = DDPMScheduler(num_train_timesteps=1000)
 
