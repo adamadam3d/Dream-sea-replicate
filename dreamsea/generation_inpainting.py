@@ -58,10 +58,16 @@ class GeneratorInpainter:
         N = latent_grid.shape[0]
         patch_grid = np.zeros((N, N, 4, 224, 224), dtype=np.float32)
 
+        # Move entire latent grid to device once before looping
+        if not isinstance(latent_grid, torch.Tensor):
+            latent_grid_tensor = torch.from_numpy(latent_grid).float().to(self.device)
+        else:
+            latent_grid_tensor = latent_grid.float().to(self.device)
+
         print(f"Generating {N}x{N} grid patches...")
         for y in range(N):
             for x in range(N):
-                patch = self.generate_patch(latent_grid[y, x])
+                patch = self.generate_patch(latent_grid_tensor[y, x])
                 patch_grid[y, x] = patch[0]
 
         return patch_grid
