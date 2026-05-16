@@ -22,7 +22,7 @@ class GeneratorInpainter:
         self.scheduler = DDPMScheduler(num_train_timesteps=1000)
 
     @torch.no_grad()
-    def generate_patch(self, latent_condition, num_inference_steps=250):
+    def generate_patch(self, latent_condition, num_inference_steps=1000):
         """
         Generates a 4-channel RGBD patch (224x224) using the conditional DDPM based on the latent condition.
         """
@@ -67,7 +67,7 @@ class GeneratorInpainter:
         return patch_grid
 
     @torch.no_grad()
-    def repaint_inpaint(self, image_input, mask, num_inference_steps=250, jump_length=10, jump_n_sample=10):
+    def repaint_inpaint(self, image_input, mask, num_inference_steps=1000, jump_length=10, jump_n_sample=10):
         """
         Implementation of RePaint using the unconditional DDPM.
         image_input: The image with known and unknown regions (1, 4, 224, 224)
