@@ -62,6 +62,10 @@ def train_ddpm(data_dir, model_type='conditional', epochs=500, batch_size=16,
     # Detect all available GPUs
     available_gpus = torch.cuda.device_count()
     print(f"DEBUG: torch.cuda.device_count() = {available_gpus}")
+    
+    # Force primary device to cuda:0 if multiple are found for DataParallel stability
+    if available_gpus > 1 and multi_gpu:
+        device = torch.device("cuda:0")
 
     if model_type == 'conditional':
         model = ConditionalDDPM().to(device)
@@ -109,6 +113,10 @@ def train_ddpm(data_dir, model_type='conditional', epochs=500, batch_size=16,
     print(f"Checkpoints will be saved to '{checkpoint_dir}' every {save_every} epochs.\n")
 
     for epoch in range(epochs):
+        # Clear cache to prevent fragmentation on small VRAM GPUs
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            
         epoch_loss = 0.0
         for step, batch in enumerate(dataloader):
             if model_type == 'conditional':
