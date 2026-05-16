@@ -15,12 +15,17 @@ class DataPreprocessor:
         self.dino_model = AutoModel.from_pretrained('facebook/dinov2-small').to(self.device)
         self.pca = PCA(n_components=2)
 
-    def process_rgb_to_rgbd(self, image_path):
+    def process_rgb_to_rgbd(self, image_input):
         """
-        Loads an RGB image, computes relative depth [0, 1], and returns a 4-channel RGBD tensor.
+        Loads an RGB image (or takes a PIL Image), computes relative depth [0, 1],
+        and returns a 4-channel RGBD tensor.
         """
         # Load image
-        image = Image.open(image_path).convert("RGB")
+        if isinstance(image_input, str):
+            image = Image.open(image_input).convert("RGB")
+        else:
+            image = image_input
+
         image_np = np.array(image).astype(np.float32) / 255.0
 
         # Estimate depth
@@ -53,22 +58,29 @@ class DataPreprocessor:
         rgbd_tensor = torch.from_numpy(rgbd_np).permute(2, 0, 1).unsqueeze(0).to(self.device)
         return rgbd_tensor
 
-    def extract_and_reduce_dino_features(self, image_paths):
+    def extract_dino_feature(self, image_input):
         """
-        Extracts DINOv2 features for a list of images and applies PCA to reduce them to 2 dimensions.
-        Returns a dictionary mapping image_path to its 2D feature vector.
+        Extracts DINOv2 features for a single image (path or PIL Image).
+        Returns the feature vector as a numpy array.
         """
-        features = []
-        for path in image_paths:
-            image = Image.open(path).convert("RGB")
-            inputs = self.dino_processor(images=image, return_tensors="pt").to(self.device)
-            with torch.no_grad():
-                outputs = self.dino_model(**inputs)
-            # Use the CLS token representation as the semantic feature vector
-            cls_token = outputs.last_hidden_state[:, 0, :].squeeze().cpu().numpy()
-            features.append(cls_token)
+        if isinstance(image_input, str):
+            image = Image.open(image_input).convert("RGB")
+        else:
+            image = image_input
 
-        features_np = np.array(features)
+        inputs = self.dino_processor(images=image, return_tensors="pt").to(self.device)
+        with torch.no_grad():
+            outputs = self.dino_model(**inputs)
+        # Use the CLS token representation as the semantic feature vector
+        cls_token = outputs.last_hidden_state[:, 0, :].squeeze().cpu().numpy()
+        return cls_token
+
+    def reduce_dino_features(self, features_list):
+        """
+        Applies PCA to reduce a list of feature vectors to 2 dimensions.
+        Returns the reduced features as a tensor.
+        """
+        features_np = np.array(features_list)
 
         # Fit PCA and transform
         # If there's only 1 sample, PCA with n_components=2 might fail or give zeros.
@@ -80,5 +92,13 @@ class DataPreprocessor:
 
         # Convert back to tensor
         reduced_features_tensor = torch.from_numpy(reduced_features).float().to(self.device)
+        return reduced_features_tensor
 
+    def extract_and_reduce_dino_features(self, image_paths):
+        """
+        Extracts DINOv2 features for a list of images and applies PCA to reduce them to 2 dimensions.
+        Returns a dictionary mapping image_path to its 2D feature vector.
+        """
+        features = [self.extract_dino_feature(path) for path in image_paths]
+        reduced_features_tensor = self.reduce_dino_features(features)
         return {path: reduced_features_tensor[i] for i, path in enumerate(image_paths)}
