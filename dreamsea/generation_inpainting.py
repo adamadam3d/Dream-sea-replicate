@@ -67,7 +67,7 @@ class GeneratorInpainter:
         return patch_grid
 
     @torch.no_grad()
-    def repaint_inpaint(self, image_input, mask, num_inference_steps=1000, jump_length=10, jump_n_sample=10):
+    def repaint_inpaint(self, image_input, mask, num_inference_steps=1000):
         """
         Implementation of RePaint using the unconditional DDPM.
         image_input: The image with known and unknown regions (1, 4, 224, 224)
