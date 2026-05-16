@@ -93,7 +93,7 @@ def compute_sds_loss(diffusion_model, scheduler, rendered_image, text_embeddings
     # 3. SDS gradient weighting
     # grad = w(t) * (noise_pred - noise)
     # where w(t) is a weighting function, often simplified to 1 or alpha_t
-    w = 1.0 - scheduler.alphas_cumprod[t]
+    w = 1.0 - scheduler.alphas_cumprod.to(t.device)[t]
 
     grad = w * (noise_pred - noise)
 

@@ -90,7 +90,8 @@ class GeneratorInpainter:
             # Known region
             if i < len(timesteps) - 1:
                 noise = torch.randn_like(image_input)
-                x_known_t = self.scheduler.add_noise(image_input, noise, torch.tensor([t], device=self.device))
+                t_next = timesteps[i+1]
+                x_known_t = self.scheduler.add_noise(image_input, noise, torch.tensor([t_next], device=self.device))
             else:
                 x_known_t = image_input
 
