@@ -28,7 +28,7 @@ class PreprocessedDataset(Dataset):
 
     def __getitem__(self, idx):
         rgbd_path = self.rgbd_files[idx]
-        image = torch.load(rgbd_path)
+        image = torch.load(rgbd_path, weights_only=True)
         
         # The preprocessor saved tensors as [1, 4, H, W]
         # We need to squeeze out all leading 1s to get [4, H, W]
@@ -44,7 +44,7 @@ class PreprocessedDataset(Dataset):
             # Load corresponding condition vector
             base_name = rgbd_path.name.replace("_rgbd.pt", "")
             cond_path = self.data_dir / "conditions" / f"{base_name}_cond.pt"
-            condition = torch.load(cond_path)
+            condition = torch.load(cond_path, weights_only=True)
             # Squeeze to ensure it's a 1D tensor of size 2 instead of (1, 2)
             condition = condition.squeeze()
             return image, condition
