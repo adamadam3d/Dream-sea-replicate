@@ -5,6 +5,7 @@ import torch
 import torch.nn.functional as F
 from diffusers import DDPMScheduler
 from torch.utils.data import DataLoader, Dataset
+from accelerate import Accelerator
 from dreamsea.models import ConditionalDDPM, UnconditionalDDPM
 
 class PreprocessedDataset(Dataset):
@@ -60,141 +61,114 @@ def train_ddpm(data_dir, model_type='conditional', epochs=500, batch_size=16,
     # Create checkpoint directory if it doesn't exist
     os.makedirs(checkpoint_dir, exist_ok=True)
 
-    # Detect all available GPUs
-    available_gpus = torch.cuda.device_count()
-    if multi_gpu:
-        print(f"DEBUG: torch.cuda.device_count() = {available_gpus}")
+    # Initialize Accelerator
+    # If multi_gpu is True, we let accelerate handle the distributed backend.
+    # Otherwise, we restrict it to a single process.
+    accelerator = Accelerator(
+        mixed_precision=mixed_precision if mixed_precision != 'no' else 'no',
+        gradient_accumulation_steps=gradient_accumulation_steps,
+        cpu=device == 'cpu'
+    )
     
-    # Force primary device to cuda:0 if multiple are found for DataParallel stability
-    if available_gpus > 1 and multi_gpu and "cuda" in str(device):
-        device = torch.device("cuda:0")
+    if multi_gpu:
+        print(f"DEBUG: Using Accelerate. Multi-GPU environment depends on accelerate launch config.")
+    else:
+        print("DEBUG: Using Accelerate for single GPU/CPU.")
 
     if model_type == 'conditional':
-        model = ConditionalDDPM().to(device)
+        model = ConditionalDDPM()
         dataset = PreprocessedDataset(data_dir, conditional=True)
     elif model_type == 'unconditional':
-        model = UnconditionalDDPM().to(device)
+        model = UnconditionalDDPM()
         dataset = PreprocessedDataset(data_dir, conditional=False)
     else:
         raise ValueError("model_type must be 'conditional' or 'unconditional'")
 
-    # Multi-GPU support (Must be done before optimizer initialization)
-    if multi_gpu and available_gpus > 1 and "cuda" in str(device):
-        print(f"--- Using {available_gpus} GPUs for training! ---")
-        model = torch.nn.DataParallel(model)
-        
     # Resume from checkpoint if provided
     if resume_from and os.path.exists(resume_from):
-        print(f"Loading checkpoint from: {resume_from}")
-        state_dict = torch.load(resume_from, map_location=device)
-        # Handle loading state_dict that was saved from DataParallel into a possibly non-DataParallel model
-        if isinstance(model, torch.nn.DataParallel):
-            # Check if state_dict has 'module.' prefix
-            first_key = next(iter(state_dict))
-            if first_key.startswith('module.'):
-                model.load_state_dict(state_dict)
-            else:
-                # Add 'module.' prefix
-                new_state_dict = {'module.' + k: v for k, v in state_dict.items()}
-                model.load_state_dict(new_state_dict)
-        else:
-            # Remove 'module.' prefix if it exists
-            new_state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
-            model.load_state_dict(new_state_dict)
+        accelerator.print(f"Loading checkpoint from: {resume_from}")
+        # When using accelerate, we load weights onto CPU first, then let accelerate place them
+        state_dict = torch.load(resume_from, map_location='cpu')
+        
+        # Clean up any 'module.' prefixes from old DataParallel saves
+        clean_state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
+        model.load_state_dict(clean_state_dict)
     elif resume_from:
-        print(f"Warning: Checkpoint not found at {resume_from}. Starting from scratch.")
+        accelerator.print(f"Warning: Checkpoint not found at {resume_from}. Starting from scratch.")
 
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=True)
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
     noise_scheduler = DDPMScheduler(num_train_timesteps=1000)
 
-    # Mixed precision setup
-    scaler = torch.amp.GradScaler('cuda') if mixed_precision == 'fp16' and "cuda" in str(device) else None
-    autocast_ctx = torch.amp.autocast('cuda', dtype=torch.float16) if mixed_precision == 'fp16' and "cuda" in str(device) else torch.inference_mode(False) # Dummy context
+    # Prepare everything with accelerator
+    model, optimizer, dataloader = accelerator.prepare(model, optimizer, dataloader)
 
     model.train()
-    print(f"Starting training for {model_type} DDPM on {device}...")
-    print(f"Dataset size: {len(dataset)} images")
-    print(f"Batch size: {batch_size} (Total across all GPUs), Epochs: {epochs}")
-    print(f"Gradient accumulation steps: {gradient_accumulation_steps}")
-    print(f"Mixed precision: {mixed_precision}")
-    print(f"Checkpoints will be saved to '{checkpoint_dir}' every {save_every} epochs.\n")
+    accelerator.print(f"Starting training for {model_type} DDPM...")
+    accelerator.print(f"Dataset size: {len(dataset)} images")
+    accelerator.print(f"Batch size per device: {batch_size}, Epochs: {epochs}")
+    accelerator.print(f"Gradient accumulation steps: {gradient_accumulation_steps}")
+    accelerator.print(f"Mixed precision: {accelerator.mixed_precision}")
+    accelerator.print(f"Checkpoints will be saved to '{checkpoint_dir}' every {save_every} epochs.\n")
 
     for epoch in range(epochs):
         # Clear cache to prevent fragmentation on small VRAM GPUs
-        if torch.cuda.is_available():
+        if torch.cuda.is_available() and accelerator.is_main_process:
             torch.cuda.empty_cache()
             
         epoch_loss = 0.0
-        optimizer.zero_grad()
         
         for step, batch in enumerate(dataloader):
-            if model_type == 'conditional':
-                clean_images, conditions = batch
-                clean_images = clean_images.to(device)
-                conditions = conditions.view(clean_images.shape[0], 1, 2).to(device)
-            else:
-                clean_images = batch.to(device)
+            with accelerator.accumulate(model):
+                if model_type == 'conditional':
+                    clean_images, conditions = batch
+                    # Conditions need reshaping
+                    conditions = conditions.view(clean_images.shape[0], 1, 2)
+                else:
+                    clean_images = batch
 
-            # Sample noise
-            noise = torch.randn(clean_images.shape, device=clean_images.device)
-            bs = clean_images.shape[0]
-            timesteps = torch.randint(
-                0, noise_scheduler.config.num_train_timesteps, (bs,), device=clean_images.device
-            ).long()
+                # Sample noise
+                noise = torch.randn(clean_images.shape, device=clean_images.device)
+                bs = clean_images.shape[0]
+                timesteps = torch.randint(
+                    0, noise_scheduler.config.num_train_timesteps, (bs,), device=clean_images.device
+                ).long()
 
-            # Add noise
-            noisy_images = noise_scheduler.add_noise(clean_images, noise, timesteps)
+                # Add noise
+                noisy_images = noise_scheduler.add_noise(clean_images, noise, timesteps)
 
-            # Forward pass with optional mixed precision
-            if scaler is not None:
-                with torch.amp.autocast('cuda', dtype=torch.float16):
-                    if model_type == 'conditional':
-                        noise_pred = model(noisy_images, timesteps, encoder_hidden_states=conditions)
-                    else:
-                        noise_pred = model(noisy_images, timesteps)
-                    
-                    # Compute loss
-                    loss = F.mse_loss(noise_pred, noise.to(noise_pred.device))
-                    # Scale loss for gradient accumulation
-                    loss = loss / gradient_accumulation_steps
-                
-                # Backward pass
-                scaler.scale(loss).backward()
-            else:
+                # Predict the noise residual
                 if model_type == 'conditional':
                     noise_pred = model(noisy_images, timesteps, encoder_hidden_states=conditions)
                 else:
                     noise_pred = model(noisy_images, timesteps)
                 
-                loss = F.mse_loss(noise_pred, noise.to(noise_pred.device))
-                loss = loss / gradient_accumulation_steps
-                loss.backward()
-
-            # Optimizer step every N steps (Gradient Accumulation)
-            if (step + 1) % gradient_accumulation_steps == 0 or (step + 1) == len(dataloader):
-                if scaler is not None:
-                    scaler.step(optimizer)
-                    scaler.update()
-                else:
-                    optimizer.step()
+                # Compute loss
+                loss = F.mse_loss(noise_pred, noise)
+                
+                # Backward pass handled by accelerate
+                accelerator.backward(loss)
+                optimizer.step()
                 optimizer.zero_grad()
-            
-            epoch_loss += loss.mean().item() * gradient_accumulation_steps
+                
+                # Accumulate average loss (only logging on main process later)
+                epoch_loss += loss.item()
 
-        avg_loss = epoch_loss / len(dataloader)
-        print(f"Epoch {epoch + 1}/{epochs} | Avg Loss: {avg_loss:.4f}")
+        # Log average loss (only on main process to prevent duplicate prints)
+        if accelerator.is_main_process:
+            avg_loss = epoch_loss / len(dataloader)
+            print(f"Epoch {epoch + 1}/{epochs} | Avg Loss: {avg_loss:.4f}")
 
-        # Checkpointing
-        if (epoch + 1) % save_every == 0 or (epoch + 1) == epochs:
-            checkpoint_path = os.path.join(checkpoint_dir, f"{model_type}_epoch_{epoch+1}.pt")
-            
-            # Handle DataParallel state_dict saving - always save the raw model weights (without 'module.')
-            state_dict = model.module.state_dict() if isinstance(model, torch.nn.DataParallel) else model.state_dict()
-            torch.save(state_dict, checkpoint_path)
-            print(f"--> Saved checkpoint: {checkpoint_path}")
+            # Checkpointing
+            if (epoch + 1) % save_every == 0 or (epoch + 1) == epochs:
+                checkpoint_path = os.path.join(checkpoint_dir, f"{model_type}_epoch_{epoch+1}.pt")
+                
+                # Unwrap model before saving to ensure clean state dict
+                unwrapped_model = accelerator.unwrap_model(model)
+                torch.save(unwrapped_model.state_dict(), checkpoint_path)
+                print(f"--> Saved checkpoint: {checkpoint_path}")
 
-    print("\nTraining complete.")
+    accelerator.print("\nTraining complete.")
     return model
 
 if __name__ == "__main__":
