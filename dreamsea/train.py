@@ -59,6 +59,10 @@ def train_ddpm(data_dir, model_type='conditional', epochs=500, batch_size=16,
     # Create checkpoint directory if it doesn't exist
     os.makedirs(checkpoint_dir, exist_ok=True)
 
+    # Detect all available GPUs
+    available_gpus = torch.cuda.device_count()
+    print(f"DEBUG: torch.cuda.device_count() = {available_gpus}")
+
     if model_type == 'conditional':
         model = ConditionalDDPM().to(device)
         dataset = PreprocessedDataset(data_dir, conditional=True)
@@ -69,8 +73,8 @@ def train_ddpm(data_dir, model_type='conditional', epochs=500, batch_size=16,
         raise ValueError("model_type must be 'conditional' or 'unconditional'")
 
     # Multi-GPU support (Must be done before optimizer initialization)
-    if multi_gpu and torch.cuda.device_count() > 1 and "cuda" in str(device):
-        print(f"--- Using {torch.cuda.device_count()} GPUs for training! ---")
+    if multi_gpu and available_gpus > 1:
+        print(f"--- Using {available_gpus} GPUs for training! ---")
         model = torch.nn.DataParallel(model)
         
     # Resume from checkpoint if provided
