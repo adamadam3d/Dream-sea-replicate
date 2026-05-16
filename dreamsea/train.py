@@ -139,13 +139,16 @@ def train_ddpm(data_dir, model_type='conditional', epochs=500, batch_size=16,
             else:
                 noise_pred = model(noisy_images, timesteps)
 
-            loss = F.mse_loss(noise_pred, noise)
+            # In DataParallel, noise_pred and noise might be on different devices if not careful,
+            # though usually noise follows clean_images. To be safe:
+            loss = F.mse_loss(noise_pred, noise.to(noise_pred.device))
 
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
             
-            epoch_loss += loss.item()
+            # If DataParallel returns a vector of losses, take the mean for logging
+            epoch_loss += loss.mean().item()
 
         avg_loss = epoch_loss / len(dataloader)
         print(f"Epoch {epoch + 1}/{epochs} | Avg Loss: {avg_loss:.4f}")
