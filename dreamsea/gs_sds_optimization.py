@@ -31,7 +31,13 @@ class GaussianSplattingModel(nn.Module):
         """
         # Placeholder for rendering
         # Just returning random image matching camera res
-        return torch.randn(1, 3, 224, 224).to(self.device)
+        rendered_image = torch.randn(1, 3, 224, 224).to(self.device)
+
+        # Multiply by the sum of parameters to fix autograd in dummy implementation
+        param_sum = self.scaling.sum() + self.rotation.sum() + self.opacity.sum() + self.features_dc.sum()
+        rendered_image = rendered_image * param_sum
+
+        return rendered_image
 
 def create_point_cloud_from_rgbd(rgbd_map, fov=60.0):
     """
@@ -106,11 +112,7 @@ def compute_sds_loss(diffusion_model, scheduler, rendered_image, text_embeddings
 
     # Normally it's just: loss = torch.sum(grad.detach() * rendered_image)
     # But for dummy testing we force a gradient connection if rendered_image has no grad_fn
-    if not rendered_image.requires_grad:
-        loss = torch.sum(grad.detach() * rendered_image)
-        loss.requires_grad_(True)
-    else:
-        loss = torch.sum(grad.detach() * rendered_image)
+    loss = torch.sum(grad.detach() * rendered_image)
 
     return loss
 
