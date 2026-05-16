@@ -51,7 +51,8 @@ class PreprocessedDataset(Dataset):
         return image
 
 def train_ddpm(data_dir, model_type='conditional', epochs=500, batch_size=16, 
-               checkpoint_dir='checkpoints', save_every=50, resume_from=None, device='cuda' if torch.cuda.is_available() else 'cpu'):
+               checkpoint_dir='checkpoints', save_every=50, resume_from=None, 
+               device='cuda' if torch.cuda.is_available() else 'cpu', multi_gpu=True):
     """
     Training loop for DDPM models using preprocessed data.
     """
@@ -67,18 +68,31 @@ def train_ddpm(data_dir, model_type='conditional', epochs=500, batch_size=16,
     else:
         raise ValueError("model_type must be 'conditional' or 'unconditional'")
 
+    # Multi-GPU support (Must be done before optimizer initialization)
+    if multi_gpu and torch.cuda.device_count() > 1 and "cuda" in str(device):
+        print(f"--- Using {torch.cuda.device_count()} GPUs for training! ---")
+        model = torch.nn.DataParallel(model)
+        
     # Resume from checkpoint if provided
     if resume_from and os.path.exists(resume_from):
         print(f"Loading checkpoint from: {resume_from}")
         state_dict = torch.load(resume_from, map_location=device)
-        model.load_state_dict(state_dict)
+        # Handle loading state_dict that was saved from DataParallel into a possibly non-DataParallel model
+        if isinstance(model, torch.nn.DataParallel):
+            # Check if state_dict has 'module.' prefix
+            first_key = next(iter(state_dict))
+            if first_key.startswith('module.'):
+                model.load_state_dict(state_dict)
+            else:
+                # Add 'module.' prefix
+                new_state_dict = {'module.' + k: v for k, v in state_dict.items()}
+                model.load_state_dict(new_state_dict)
+        else:
+            # Remove 'module.' prefix if it exists
+            new_state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
+            model.load_state_dict(new_state_dict)
     elif resume_from:
         print(f"Warning: Checkpoint not found at {resume_from}. Starting from scratch.")
-
-    # Multi-GPU support
-    if torch.cuda.device_count() > 1 and "cuda" in str(device):
-        print(f"--- Using {torch.cuda.device_count()} GPUs for training! ---")
-        model = torch.nn.DataParallel(model)
 
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=True)
     optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
@@ -136,7 +150,7 @@ def train_ddpm(data_dir, model_type='conditional', epochs=500, batch_size=16,
         if (epoch + 1) % save_every == 0 or (epoch + 1) == epochs:
             checkpoint_path = os.path.join(checkpoint_dir, f"{model_type}_epoch_{epoch+1}.pt")
             
-            # Handle DataParallel state_dict saving
+            # Handle DataParallel state_dict saving - always save the raw model weights (without 'module.')
             state_dict = model.module.state_dict() if isinstance(model, torch.nn.DataParallel) else model.state_dict()
             torch.save(state_dict, checkpoint_path)
             print(f"--> Saved checkpoint: {checkpoint_path}")
@@ -154,6 +168,7 @@ if __name__ == "__main__":
     parser.add_argument("--save_every", type=int, default=50, help="Save a checkpoint every N epochs.")
     parser.add_argument("--resume_from", type=str, default=None, help="Path to a checkpoint .pt file to resume training from.")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Compute device.")
+    parser.add_argument("--no_multi_gpu", action="store_true", help="Disable multi-GPU training even if multiple GPUs are available.")
 
     args = parser.parse_args()
 
@@ -165,5 +180,6 @@ if __name__ == "__main__":
         checkpoint_dir=args.checkpoint_dir,
         save_every=args.save_every,
         resume_from=args.resume_from,
-        device=args.device
+        device=args.device,
+        multi_gpu=not args.no_multi_gpu
     )
