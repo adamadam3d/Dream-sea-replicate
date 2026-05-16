@@ -54,7 +54,8 @@ class PreprocessedDataset(Dataset):
 def train_ddpm(data_dir, model_type='conditional', epochs=500, batch_size=16, 
                checkpoint_dir='checkpoints', save_every=50, resume_from=None, 
                device='cuda' if torch.cuda.is_available() else 'cpu', multi_gpu=False,
-               learning_rate=1e-4, gradient_accumulation_steps=1, mixed_precision='fp16'):
+               learning_rate=1e-4, gradient_accumulation_steps=1, mixed_precision='fp16',
+               gradient_checkpointing=False):
     """
     Training loop for DDPM models using preprocessed data.
     """
@@ -83,6 +84,10 @@ def train_ddpm(data_dir, model_type='conditional', epochs=500, batch_size=16,
         dataset = PreprocessedDataset(data_dir, conditional=False)
     else:
         raise ValueError("model_type must be 'conditional' or 'unconditional'")
+
+    if gradient_checkpointing:
+        accelerator.print("Enabling Gradient Checkpointing to save VRAM...")
+        model.unet.enable_gradient_checkpointing()
 
     # Resume from checkpoint if provided
     if resume_from and os.path.exists(resume_from):
