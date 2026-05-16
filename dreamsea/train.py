@@ -88,7 +88,7 @@ def train_ddpm(data_dir, model_type='conditional', epochs=500, batch_size=16,
     if resume_from and os.path.exists(resume_from):
         accelerator.print(f"Loading checkpoint from: {resume_from}")
         # When using accelerate, we load weights onto CPU first, then let accelerate place them
-        state_dict = torch.load(resume_from, map_location='cpu')
+        state_dict = torch.load(resume_from, map_location='cpu', weights_only=True)
         
         # Clean up any 'module.' prefixes from old DataParallel saves
         clean_state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
