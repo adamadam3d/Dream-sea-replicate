@@ -52,7 +52,8 @@ class PreprocessedDataset(Dataset):
 
 def train_ddpm(data_dir, model_type='conditional', epochs=500, batch_size=16, 
                checkpoint_dir='checkpoints', save_every=50, resume_from=None, 
-               device='cuda' if torch.cuda.is_available() else 'cpu', multi_gpu=True):
+               device='cuda' if torch.cuda.is_available() else 'cpu', multi_gpu=False,
+               learning_rate=1e-4, gradient_accumulation_steps=1, mixed_precision='fp16'):
     """
     Training loop for DDPM models using preprocessed data.
     """
@@ -61,10 +62,11 @@ def train_ddpm(data_dir, model_type='conditional', epochs=500, batch_size=16,
 
     # Detect all available GPUs
     available_gpus = torch.cuda.device_count()
-    print(f"DEBUG: torch.cuda.device_count() = {available_gpus}")
+    if multi_gpu:
+        print(f"DEBUG: torch.cuda.device_count() = {available_gpus}")
     
     # Force primary device to cuda:0 if multiple are found for DataParallel stability
-    if available_gpus > 1 and multi_gpu:
+    if available_gpus > 1 and multi_gpu and "cuda" in str(device):
         device = torch.device("cuda:0")
 
     if model_type == 'conditional':
@@ -77,7 +79,7 @@ def train_ddpm(data_dir, model_type='conditional', epochs=500, batch_size=16,
         raise ValueError("model_type must be 'conditional' or 'unconditional'")
 
     # Multi-GPU support (Must be done before optimizer initialization)
-    if multi_gpu and available_gpus > 1:
+    if multi_gpu and available_gpus > 1 and "cuda" in str(device):
         print(f"--- Using {available_gpus} GPUs for training! ---")
         model = torch.nn.DataParallel(model)
         
@@ -103,13 +105,19 @@ def train_ddpm(data_dir, model_type='conditional', epochs=500, batch_size=16,
         print(f"Warning: Checkpoint not found at {resume_from}. Starting from scratch.")
 
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=True)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-4)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
     noise_scheduler = DDPMScheduler(num_train_timesteps=1000)
+
+    # Mixed precision setup
+    scaler = torch.amp.GradScaler('cuda') if mixed_precision == 'fp16' and "cuda" in str(device) else None
+    autocast_ctx = torch.amp.autocast('cuda', dtype=torch.float16) if mixed_precision == 'fp16' and "cuda" in str(device) else torch.inference_mode(False) # Dummy context
 
     model.train()
     print(f"Starting training for {model_type} DDPM on {device}...")
     print(f"Dataset size: {len(dataset)} images")
     print(f"Batch size: {batch_size} (Total across all GPUs), Epochs: {epochs}")
+    print(f"Gradient accumulation steps: {gradient_accumulation_steps}")
+    print(f"Mixed precision: {mixed_precision}")
     print(f"Checkpoints will be saved to '{checkpoint_dir}' every {save_every} epochs.\n")
 
     for epoch in range(epochs):
@@ -118,45 +126,61 @@ def train_ddpm(data_dir, model_type='conditional', epochs=500, batch_size=16,
             torch.cuda.empty_cache()
             
         epoch_loss = 0.0
+        optimizer.zero_grad()
+        
         for step, batch in enumerate(dataloader):
             if model_type == 'conditional':
                 clean_images, conditions = batch
                 clean_images = clean_images.to(device)
-                
-                # The model expects conditions of shape (batch, seq_len, embed_dim)
-                # Ensure conditions are (batch, 1, 2)
                 conditions = conditions.view(clean_images.shape[0], 1, 2).to(device)
             else:
                 clean_images = batch.to(device)
 
-            # Sample noise to add to the images
+            # Sample noise
             noise = torch.randn(clean_images.shape, device=clean_images.device)
             bs = clean_images.shape[0]
-
-            # Sample a random timestep for each image
             timesteps = torch.randint(
                 0, noise_scheduler.config.num_train_timesteps, (bs,), device=clean_images.device
             ).long()
 
-            # Add noise to the clean images according to the noise magnitude at each timestep
+            # Add noise
             noisy_images = noise_scheduler.add_noise(clean_images, noise, timesteps)
 
-            # Predict the noise residual
-            if model_type == 'conditional':
-                noise_pred = model(noisy_images, timesteps, encoder_hidden_states=conditions)
+            # Forward pass with optional mixed precision
+            if scaler is not None:
+                with torch.amp.autocast('cuda', dtype=torch.float16):
+                    if model_type == 'conditional':
+                        noise_pred = model(noisy_images, timesteps, encoder_hidden_states=conditions)
+                    else:
+                        noise_pred = model(noisy_images, timesteps)
+                    
+                    # Compute loss
+                    loss = F.mse_loss(noise_pred, noise.to(noise_pred.device))
+                    # Scale loss for gradient accumulation
+                    loss = loss / gradient_accumulation_steps
+                
+                # Backward pass
+                scaler.scale(loss).backward()
             else:
-                noise_pred = model(noisy_images, timesteps)
+                if model_type == 'conditional':
+                    noise_pred = model(noisy_images, timesteps, encoder_hidden_states=conditions)
+                else:
+                    noise_pred = model(noisy_images, timesteps)
+                
+                loss = F.mse_loss(noise_pred, noise.to(noise_pred.device))
+                loss = loss / gradient_accumulation_steps
+                loss.backward()
 
-            # In DataParallel, noise_pred and noise might be on different devices if not careful,
-            # though usually noise follows clean_images. To be safe:
-            loss = F.mse_loss(noise_pred, noise.to(noise_pred.device))
-
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+            # Optimizer step every N steps (Gradient Accumulation)
+            if (step + 1) % gradient_accumulation_steps == 0 or (step + 1) == len(dataloader):
+                if scaler is not None:
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    optimizer.step()
+                optimizer.zero_grad()
             
-            # If DataParallel returns a vector of losses, take the mean for logging
-            epoch_loss += loss.mean().item()
+            epoch_loss += loss.mean().item() * gradient_accumulation_steps
 
         avg_loss = epoch_loss / len(dataloader)
         print(f"Epoch {epoch + 1}/{epochs} | Avg Loss: {avg_loss:.4f}")
@@ -179,11 +203,14 @@ if __name__ == "__main__":
     parser.add_argument("--model_type", type=str, choices=['conditional', 'unconditional'], default='conditional', help="Which model to train.")
     parser.add_argument("--epochs", type=int, default=500, help="Number of training epochs.")
     parser.add_argument("--batch_size", type=int, default=16, help="Training batch size.")
+    parser.add_argument("--learning_rate", type=float, default=1e-4, help="Learning rate.")
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=1, help="Number of steps to accumulate gradients.")
+    parser.add_argument("--mixed_precision", type=str, choices=['no', 'fp16'], default='fp16', help="Whether to use mixed precision (fp16).")
     parser.add_argument("--checkpoint_dir", type=str, default="checkpoints", help="Directory to save checkpoints.")
     parser.add_argument("--save_every", type=int, default=50, help="Save a checkpoint every N epochs.")
     parser.add_argument("--resume_from", type=str, default=None, help="Path to a checkpoint .pt file to resume training from.")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Compute device.")
-    parser.add_argument("--no_multi_gpu", action="store_true", help="Disable multi-GPU training even if multiple GPUs are available.")
+    parser.add_argument("--multi_gpu", action="store_true", help="Enable multi-GPU training if multiple GPUs are available.")
 
     args = parser.parse_args()
 
@@ -192,9 +219,12 @@ if __name__ == "__main__":
         model_type=args.model_type,
         epochs=args.epochs,
         batch_size=args.batch_size,
+        learning_rate=args.learning_rate,
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
+        mixed_precision=args.mixed_precision,
         checkpoint_dir=args.checkpoint_dir,
         save_every=args.save_every,
         resume_from=args.resume_from,
         device=args.device,
-        multi_gpu=not args.no_multi_gpu
+        multi_gpu=args.multi_gpu
     )
