@@ -159,7 +159,7 @@ def train_ddpm(data_dir, model_type='conditional', epochs=500, batch_size=16,
         # GPU info
         if torch.cuda.is_available():
             print(f"\n[DEBUG] GPU: {torch.cuda.get_device_name(0)}")
-            print(f"  Total VRAM: {torch.cuda.get_device_properties(0).total_mem / 1024**3:.1f} GB")
+            print(f"  Total VRAM: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.1f} GB")
             print(f"  Allocated: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
             print(f"  Reserved:  {torch.cuda.memory_reserved() / 1024**3:.2f} GB")
         
