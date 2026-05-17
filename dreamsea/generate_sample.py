@@ -31,7 +31,7 @@ def main():
     parser.add_argument("--cond_model_path", type=str, default=None, help="Path to conditional DDPM checkpoint (.pt file).")
     parser.add_argument("--output_dir", type=str, default="samples", help="Directory to save the generated images.")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Compute device.")
-    parser.add_argument("--num_inference_steps", type=int, default=250, help="Number of denoising steps (higher = better quality but slower).")
+    parser.add_argument("--num_inference_steps", type=int, default=1000, help="Number of denoising steps (higher = better quality but slower).")
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir)
