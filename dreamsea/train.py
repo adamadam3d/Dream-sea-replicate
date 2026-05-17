@@ -256,7 +256,7 @@ def train_ddpm(data_dir, model_type='conditional', epochs=500, batch_size=16,
                     if consecutive_nan_count >= max_consecutive_nan:
                         msg = f"{max_consecutive_nan} consecutive NaN batches at epoch {epoch+1}. Training is diverging — aborting."
                         accelerator.print(f"  [ERROR] {msg}")
-                        send_ntfy(ntfy_topic, "🔴 DreamSea CRASHED", msg, priority="urgent", tags="rotating_light")
+                        send_ntfy(ntfy_topic, f"🔴 {model_type} CRASHED", msg, priority="urgent", tags="rotating_light")
                         return model
                     continue
                 else:
@@ -318,13 +318,13 @@ def train_ddpm(data_dir, model_type='conditional', epochs=500, batch_size=16,
                     'optimizer_state_dict': optimizer.state_dict(),
                 }, checkpoint_path)
                 print(f"--> Saved checkpoint: {checkpoint_path}")
-                send_ntfy(ntfy_topic, "💾 DreamSea Checkpoint",
-                          f"Saved {model_type} epoch {epoch+1}/{epochs} (loss: {avg_loss:.4f})",
+                send_ntfy(ntfy_topic, f"💾 {model_type} checkpoint",
+                          f"Epoch {epoch+1}/{epochs} | loss: {avg_loss:.4f}",
                           tags="floppy_disk")
 
     accelerator.print("\nTraining complete.")
-    send_ntfy(ntfy_topic, "✅ DreamSea DONE",
-              f"{model_type} training finished! {epochs} epochs, final loss: {avg_loss:.4f}",
+    send_ntfy(ntfy_topic, f"✅ {model_type} DONE",
+              f"Training finished! {epochs} epochs, final loss: {avg_loss:.4f}",
               priority="high", tags="white_check_mark")
     return model
 
