@@ -159,6 +159,11 @@ def train_ddpm(data_dir, model_type='conditional', epochs=500, batch_size=16,
     accelerator.print(f"Mixed precision: {accelerator.mixed_precision}")
     accelerator.print(f"Checkpoints will be saved to '{checkpoint_dir}' every {save_every} epochs.")
 
+    if accelerator.is_main_process:
+        send_ntfy(ntfy_topic, f"🚀 {model_type} STARTED",
+                  f"Dataset: {len(dataset)} imgs | Batch: {batch_size} | Epochs: {epochs}",
+                  tags="rocket")
+
     # --- Data sanity check: verify first batch looks correct ---
     if accelerator.is_main_process:
         sample_batch = next(iter(dataloader))
@@ -368,4 +373,4 @@ if __name__ == "__main__":
         error_msg = f"{type(e).__name__}: {e}"
         print(f"\n[FATAL] {error_msg}")
         send_ntfy(args.ntfy_topic, "\ud83d\udd34 DreamSea CRASHED", error_msg, priority="urgent", tags="rotating_light")
-        raise
+        raise
