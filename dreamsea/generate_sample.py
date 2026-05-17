@@ -31,6 +31,7 @@ def main():
     parser.add_argument("--cond_model_path", type=str, default=None, help="Path to conditional DDPM checkpoint (.pt file).")
     parser.add_argument("--output_dir", type=str, default="samples", help="Directory to save the generated images.")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Compute device.")
+    parser.add_argument("--num_inference_steps", type=int, default=250, help="Number of denoising steps (higher = better quality but slower).")
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir)
@@ -59,9 +60,9 @@ def main():
     print(f"Using latent condition vector: {latent_condition}")
 
     # 2. Generate the patch
-    print("Running diffusion generation (this takes ~50 steps)...")
+    print(f"Running diffusion generation (this takes ~{args.num_inference_steps} steps)...")
     try:
-        patch = inpainter.generate_patch(latent_condition) # Shape: (1, 4, 224, 224)
+        patch = inpainter.generate_patch(latent_condition, num_inference_steps=args.num_inference_steps) # Shape: (1, 4, 224, 224)
     except Exception as e:
          print(f"Error during generation: {e}")
          return
