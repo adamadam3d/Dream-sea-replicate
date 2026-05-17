@@ -10,7 +10,12 @@ class GeneratorInpainter:
         # Load conditional DDPM
         self.cond_model = ConditionalDDPM().to(device)
         if cond_model_path:
-            state_dict = torch.load(cond_model_path, map_location=device, weights_only=True)
+            checkpoint = torch.load(cond_model_path, map_location=device, weights_only=False)
+            # Support both new dict-based and old raw state_dict checkpoint formats
+            if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+                state_dict = checkpoint['model_state_dict']
+            else:
+                state_dict = checkpoint
             # Safely remove 'module.' prefix ONLY if it is at the very beginning
             clean_state_dict = {k[7:] if k.startswith('module.') else k: v for k, v in state_dict.items()}
             self.cond_model.load_state_dict(clean_state_dict, strict=True)
@@ -19,7 +24,11 @@ class GeneratorInpainter:
         # Load unconditional DDPM
         self.uncond_model = UnconditionalDDPM().to(device)
         if uncond_model_path:
-            state_dict = torch.load(uncond_model_path, map_location=device, weights_only=True)
+            checkpoint = torch.load(uncond_model_path, map_location=device, weights_only=False)
+            if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+                state_dict = checkpoint['model_state_dict']
+            else:
+                state_dict = checkpoint
             clean_state_dict = {k[7:] if k.startswith('module.') else k: v for k, v in state_dict.items()}
             self.uncond_model.load_state_dict(clean_state_dict, strict=True)
         self.uncond_model.eval()

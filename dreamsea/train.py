@@ -1,5 +1,6 @@
 import os
 import argparse
+import math
 from pathlib import Path
 import torch
 import torch.nn.functional as F
@@ -39,6 +40,9 @@ class PreprocessedDataset(Dataset):
         # the inputs to 224x224, otherwise they will be too large and cause dimension errors or OOM.
         if image.shape[-2:] != (224, 224):
             image = F.interpolate(image.unsqueeze(0), size=(224, 224), mode='bilinear', align_corners=False).squeeze(0)
+        
+        # Scale from [0, 1] to [-1, 1] (Crucial for Diffusion stability)
+        image = image * 2.0 - 1.0
         
         if self.conditional:
             # Load corresponding condition vector
@@ -90,13 +94,21 @@ def train_ddpm(data_dir, model_type='conditional', epochs=500, batch_size=16,
         model.unet.enable_gradient_checkpointing()
 
     # Resume from checkpoint if provided
+    start_epoch = 0
     if resume_from and os.path.exists(resume_from):
         accelerator.print(f"Loading checkpoint from: {resume_from}")
         # When using accelerate, we load weights onto CPU first, then let accelerate place them
-        state_dict = torch.load(resume_from, map_location='cpu', weights_only=True)
+        checkpoint = torch.load(resume_from, map_location='cpu', weights_only=False)
+        
+        # Support both old-style (raw state_dict) and new-style (dict with keys) checkpoints
+        if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+            model_state = checkpoint['model_state_dict']
+            start_epoch = checkpoint.get('epoch', 0)
+        else:
+            model_state = checkpoint
         
         # Clean up any 'module.' prefixes from old DataParallel saves
-        clean_state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
+        clean_state_dict = {k.replace('module.', ''): v for k, v in model_state.items()}
         model.load_state_dict(clean_state_dict)
     elif resume_from:
         accelerator.print(f"Warning: Checkpoint not found at {resume_from}. Starting from scratch.")
@@ -116,12 +128,17 @@ def train_ddpm(data_dir, model_type='conditional', epochs=500, batch_size=16,
     accelerator.print(f"Mixed precision: {accelerator.mixed_precision}")
     accelerator.print(f"Checkpoints will be saved to '{checkpoint_dir}' every {save_every} epochs.\n")
 
-    for epoch in range(epochs):
+    # Track consecutive NaN batches — if too many in a row, training is diverging
+    max_consecutive_nan = 10
+    consecutive_nan_count = 0
+
+    for epoch in range(start_epoch, epochs):
         # Clear cache to prevent fragmentation on small VRAM GPUs
         if torch.cuda.is_available() and accelerator.is_main_process:
             torch.cuda.empty_cache()
             
         epoch_loss = 0.0
+        valid_steps = 0
         
         for step, batch in enumerate(dataloader):
             with accelerator.accumulate(model):
@@ -131,6 +148,11 @@ def train_ddpm(data_dir, model_type='conditional', epochs=500, batch_size=16,
                     conditions = conditions.view(clean_images.shape[0], 1, 2)
                 else:
                     clean_images = batch
+
+                # Sanity check: skip batches with NaN/Inf in input data
+                if torch.isnan(clean_images).any() or torch.isinf(clean_images).any():
+                    accelerator.print(f"  [WARN] Epoch {epoch+1}, step {step}: NaN/Inf in input data, skipping batch.")
+                    continue
 
                 # Sample noise
                 noise = torch.randn(clean_images.shape, device=clean_images.device)
@@ -151,6 +173,24 @@ def train_ddpm(data_dir, model_type='conditional', epochs=500, batch_size=16,
                 # Compute loss
                 loss = F.mse_loss(noise_pred, noise)
                 
+                # NaN loss detection: skip this batch to prevent poisoning the optimizer state
+                if torch.isnan(loss) or torch.isinf(loss):
+                    consecutive_nan_count += 1
+                    accelerator.print(
+                        f"  [WARN] Epoch {epoch+1}, step {step}: NaN/Inf loss detected "
+                        f"({consecutive_nan_count}/{max_consecutive_nan} consecutive). Skipping batch."
+                    )
+                    optimizer.zero_grad()
+                    if consecutive_nan_count >= max_consecutive_nan:
+                        accelerator.print(
+                            f"  [ERROR] {max_consecutive_nan} consecutive NaN batches. "
+                            f"Training is diverging — aborting."
+                        )
+                        return model
+                    continue
+                else:
+                    consecutive_nan_count = 0
+                
                 # Backward pass handled by accelerate
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
@@ -160,19 +200,24 @@ def train_ddpm(data_dir, model_type='conditional', epochs=500, batch_size=16,
                 
                 # Accumulate average loss (only logging on main process later)
                 epoch_loss += loss.item()
+                valid_steps += 1
 
         # Log average loss (only on main process to prevent duplicate prints)
         if accelerator.is_main_process:
-            avg_loss = epoch_loss / len(dataloader)
-            print(f"Epoch {epoch + 1}/{epochs} | Avg Loss: {avg_loss:.4f}")
+            avg_loss = epoch_loss / max(valid_steps, 1)
+            print(f"Epoch {epoch + 1}/{epochs} | Avg Loss: {avg_loss:.4f} ({valid_steps}/{len(dataloader)} valid steps)")
 
-            # Checkpointing
+            # Checkpointing — save optimizer state alongside model for safe resumption
             if (epoch + 1) % save_every == 0 or (epoch + 1) == epochs:
                 checkpoint_path = os.path.join(checkpoint_dir, f"{model_type}_epoch_{epoch+1}.pt")
                 
                 # Unwrap model before saving to ensure clean state dict
                 unwrapped_model = accelerator.unwrap_model(model)
-                torch.save(unwrapped_model.state_dict(), checkpoint_path)
+                torch.save({
+                    'epoch': epoch + 1,
+                    'model_state_dict': unwrapped_model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                }, checkpoint_path)
                 print(f"--> Saved checkpoint: {checkpoint_path}")
 
     accelerator.print("\nTraining complete.")
