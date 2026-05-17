@@ -7,7 +7,7 @@ This guide explains how to use the various components of the DreamSea pipeline, 
 To verify that the entire pipeline works and all components are correctly integrated, you can run the main execution script. This script performs an abbreviated, "dummy" version of the generation, stitching, and 3D Gaussian Splatting optimization steps on a small grid footprint.
 
 ```bash
-PYTHONPATH=. python dreamsea/main.py
+python -m dreamsea.main
 ```
 
 This will run through:
@@ -19,35 +19,50 @@ This will run through:
 
 ## Training the Models
 
-If you wish to train the Conditional and Unconditional DDPMs from scratch or fine-tune them on your own dataset, you can use the `train.py` script as a starting point.
+You can train the Conditional and Unconditional DDPMs from scratch on your own dataset.
 
-The default script sets up a dummy dataset and runs a mock training loop to verify that the backpropagation and loss functions work correctly without crashing.
+### 1. Data Preprocessing
+
+First, you need to preprocess your directory of raw RGB images. This script will extract DINOv2 conditions, estimate depth maps, fit a PCA model (saved to `pca_model.pkl`), and save the normalized tensors to disk.
 
 ```bash
-PYTHONPATH=. python dreamsea/train.py
+python -m dreamsea.preprocess_dataset --input_dir /path/to/raw/images --output_dir /path/to/processed/data
 ```
 
-### Preparing for Real-World Training
+### 2. Training the DDPMs
 
-To train the models to a useful point, you must perform several extensive data preparation and tuning steps:
+Once preprocessed, you can train both models. The training script automatically loads the data, applies `[-1, 1]` diffusion normalization, and monitors for NaN/Inf divergence.
 
-#### 1. Dataset Preparation
-- **Collect Data**: Gather thousands of high-quality underwater RGB images.
-- **Preprocess**: You must pass every image through the `DataPreprocessor` (see section below).
-  - Save the resulting 4-channel RGBD tensors to disk (e.g., as `.pt` or `.npy` files).
-  - Save the corresponding 2D PCA-reduced DINOv2 feature vectors.
-- **Custom DataLoader**: Replace the `DummyDataset` in `train.py` with a PyTorch `Dataset` that streams your precomputed RGBD tensors and conditions from disk.
+**Train Conditional Model (Patch Generation):**
+```bash
+python -m dreamsea.train \
+  --data_dir /path/to/processed/data \
+  --model_type conditional \
+  --epochs 2000 \
+  --batch_size 12 \
+  --save_every 50
+```
 
-#### 2. Hyperparameter Tuning
-A dummy run trains for 5 epochs with a learning rate of `1e-4`. To achieve meaningful results:
-- **Epochs**: Increase the number of epochs significantly (e.g., 500 - 1000+).
-- **Batch Size**: Maximize your batch size based on your VRAM (e.g., 16, 32, or 64). If VRAM is limited, use gradient accumulation.
-- **Timesteps**: `num_train_timesteps` is set to 1000. You may experiment with cosine vs linear schedules.
+**Train Unconditional Model (RePaint Stitching):**
+```bash
+python -m dreamsea.train \
+  --data_dir /path/to/processed/data \
+  --model_type unconditional \
+  --epochs 2000 \
+  --batch_size 12 \
+  --save_every 50
+```
 
-#### 3. Monitoring and Checkpointing
-- **Loss Logging**: Integrate a logging framework like Weights & Biases (`wandb`) or TensorBoard to track the MSE loss over time.
-- **Checkpoints**: Add code within the training loop to periodically save the `state_dict` of both the `cond_model` and `uncond_model` to disk (e.g., `torch.save(cond_model.state_dict(), f"checkpoints/cond_epoch_{epoch}.pt")`).
-- **Validation**: It is highly recommended to add a validation loop that periodically samples an image using the DDPM to visually track generation quality.
+### 3. Generating Samples
+
+You can test your trained conditional model and generate sample RGBD images using the provided generation script:
+
+```bash
+python -m dreamsea.generate_sample \
+  --cond_model_path checkpoints/conditional_epoch_2000.pt \
+  --output_dir samples/ \
+  --num_inference_steps 1000
+```
 
 ## Interacting with Individual Modules
 
