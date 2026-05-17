@@ -1,6 +1,7 @@
 import os
 import glob
 import torch
+import joblib
 from pathlib import Path
 from dreamsea.data_preprocessing import DataPreprocessor
 
@@ -37,6 +38,11 @@ def preprocess_dataset(input_dir: str, output_dir: str, device: str = 'cuda'):
     # We do this together so PCA is fit on the entire dataset distribution
     print("Extracting and reducing DINOv2 features (this may take a while depending on dataset size)...")
     features_dict = preprocessor.extract_and_reduce_dino_features(image_paths)
+
+    # Save the fitted PCA model so it can be reused at inference time
+    pca_save_path = output_path / "pca_model.pkl"
+    joblib.dump(preprocessor.pca, pca_save_path)
+    print(f"Saved fitted PCA model to: {pca_save_path}")
 
     # 2. Process RGB to RGBD and save everything
     print("Processing RGBD and saving tensors...")

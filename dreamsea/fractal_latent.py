@@ -9,6 +9,8 @@ def diamond_square_2d(size, roughness=0.5, seed=None):
     if seed is not None:
         np.random.seed(seed)
 
+    if size < 3:
+        raise ValueError("Size must be at least 3 (2^1 + 1)")
     if (size - 1) & (size - 2) != 0:
         raise ValueError("Size must be 2^n + 1")
 

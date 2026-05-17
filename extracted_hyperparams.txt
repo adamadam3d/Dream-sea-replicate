@@ -1,0 +1,65 @@
+scenes conditioned on latent embeddings from a fractal process. All images and maps shown above are synthesized with DreamSea.
+realistic seafloor images in RGBD channels, conditioned on
+as depth sensors and LiDARs commonly do not work well
+can be hypothesized that the training data for underwater
+Three-dimensional scenes are often represented as point
+train the image diffusion model conditioned on DINO v2
+tent space. Depth Anything v2 [32] is a depth foundation
+model that predicts depth from RGB images. In many cases
+this is used to generate RGB+Depth (RGBD) images from
+lected from underwater surveys, we generate depth channels and
+lows. In Sec. 3.1, we outline the extraction of relative depth
+3.1. 3D Structure from Depth Foundation Model
+seek to incorporate depth into the diffusion-based gener-
+In this paper, we use the depth foundation model, Depth
+Anything v2 [32], to generate a depth map from 2D image
+data. Depth foundation models are good at predicting the
+relative depth distribution in single frames. We normalize
+this prediction to [0,1]. In this work, we consider depths up
+to a scale factor, and do not require absolute metric depth.
+or classic stereo-matching methods. Estimated depths are
+used as additional channels for the real-world training data.
+sual model, DINO v2 [20], to extract zero-shot features
+generate DINO v2 features and then apply Principal Com-
+dimensional features to the low-dimensional space. This
+reduced dimensional feature vector then acts as a descrip-
+tures onto a low-dimension space. Early work by Zhang et
+After obtaining a reduced-dimensional feature vector for
+ture vectors, to generate both RGB and depth images.Let us denote the feature vector as
+ϕ←PCA(DINOv2 (I)), (1)
+where Iis an image and PCA(DINOv2 (·))indicates apply-
+ing PCA to the feature vector outputted by the DINO model,
+reducing dimensionality. During inference, our conditional
+where dis the dimensionality of the latent vector after PCA
+depth generated using Depth Anything v2 [32]. The result-
+We begin by using the depth channels from the gener-
+Herepiis initialized from the depths of the generated im-
+the geometry with an up-to-scale depth diffusion model is
+GPU with 24GB VRAM for 2000 epochs, with a batch size
+of 12. Although the size of each data set differs, it usually
+the resolution of 224×224. We use the first two main com-
+ponents from PCA results on DINO v2 embeddings. From
+well, as shown in Figure 7. The generated relative depth
+from the depth foundation model.
+well as depth estimation distilled from depth anything v2 [32].
+Figure 9. Examples of image generation conditioned on interpolated DINO embeddings. A smooth transition can be observed.
+Table 1. MSE ↓on CLIP [25]/DINO [20] embedding space eval-
+control accuracy by evaluating the CLIP and DINO latent of
+generated image patches (Reference embedding of DINO is
+be synthesized into our map, creating more realistic appear-
+suals and estimated depths are integrated as priors to con-
+large-scale three-dimensional reconstructions from underwa-
+otr Bojanowski. DINOv2: Learning robust visual features
+without supervision. Transactions on Machine Learning Re-
+[22] Ken Perlin. An image synthesizer. In Proceedings of the
+Eleventh International Conference on Learning Representa-
+Amanda Askell, Pamela Mishkin, Jack Clark, et al. Learning
+sion. In International conference on machine learning , pages
+Patrick Esser, and Bj ¨orn Ommer. High-resolution image
+ference on Learning Representations . 3
+benchmarking and robust learning for noise-free ego-motion
+gang Xu, Jiashi Feng, and Hengshuang Zhao. Depth any-
+[35] Tianyi Zhang and Matthew Johnson-Roberson. Learning
+underwater: Learning neural reflectance fields for true color
+Learning neural reflectance fields for true color correction
+Johnson-Roberson. Darkgs: Learning neural illumination

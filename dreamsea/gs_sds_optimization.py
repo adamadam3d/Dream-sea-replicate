@@ -36,9 +36,16 @@ class GaussianSplattingModel(nn.Module):
 def create_point_cloud_from_rgbd(rgbd_map, fov=60.0):
     """
     Converts a stitched RGBD map into a 3D point cloud.
-    rgbd_map: (4, H, W) numpy array, channels are RGB + Depth
+    rgbd_map: (4, H, W) numpy array, channels are RGB + Depth.
+    Accepts values in either [0, 1] or [-1, 1] range (auto-detected).
     """
     C, H, W = rgbd_map.shape
+
+    # Auto-detect and denormalize from [-1, 1] to [0, 1] if needed
+    if rgbd_map.min() < -0.5:
+        rgbd_map = (rgbd_map + 1.0) / 2.0
+        rgbd_map = np.clip(rgbd_map, 0.0, 1.0)
+
     rgb = rgbd_map[:3, :, :].transpose(1, 2, 0) # (H, W, 3)
     depth = rgbd_map[3, :, :] # (H, W)
 

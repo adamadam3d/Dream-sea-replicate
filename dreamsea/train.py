@@ -1,6 +1,5 @@
 import os
 import argparse
-import math
 import time
 from pathlib import Path
 import torch
@@ -30,7 +29,7 @@ class PreprocessedDataset(Dataset):
 
     def __getitem__(self, idx):
         rgbd_path = self.rgbd_files[idx]
-        image = torch.load(rgbd_path)
+        image = torch.load(rgbd_path, weights_only=True)
         
         # The preprocessor saved tensors as [1, 4, H, W]
         # We need to squeeze out all leading 1s to get [4, H, W]
@@ -49,7 +48,7 @@ class PreprocessedDataset(Dataset):
             # Load corresponding condition vector
             base_name = rgbd_path.name.replace("_rgbd.pt", "")
             cond_path = self.data_dir / "conditions" / f"{base_name}_cond.pt"
-            condition = torch.load(cond_path)
+            condition = torch.load(cond_path, weights_only=True)
             # Squeeze to ensure it's a 1D tensor of size 2 instead of (1, 2)
             condition = condition.squeeze()
             return image, condition
@@ -120,6 +119,14 @@ def train_ddpm(data_dir, model_type='conditional', epochs=500, batch_size=16,
 
     # Prepare everything with accelerator
     model, optimizer, dataloader = accelerator.prepare(model, optimizer, dataloader)
+
+    # Restore optimizer state AFTER accelerator.prepare() so device placement is correct
+    if resume_from and os.path.exists(resume_from) and isinstance(checkpoint, dict) and 'optimizer_state_dict' in checkpoint:
+        try:
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            accelerator.print("Restored optimizer state from checkpoint.")
+        except Exception as e:
+            accelerator.print(f"Warning: Could not restore optimizer state: {e}. Using fresh optimizer.")
 
     model.train()
     accelerator.print(f"Starting training for {model_type} DDPM...")

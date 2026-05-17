@@ -40,7 +40,7 @@ class DataPreprocessor:
         # pipeline output should already match input PIL image, but just in case
         if depth_normalized.shape != image_np.shape[:2]:
             depth_pil = Image.fromarray(depth_normalized)
-            depth_pil = depth_pil.resize((image_np.shape[1], image_np.shape[0]), Image.BILINEAR)
+            depth_pil = depth_pil.resize((image_np.shape[1], image_np.shape[0]), Image.Resampling.BILINEAR)
             depth_normalized = np.array(depth_pil)
 
         # Expand depth dimension to concatenate
