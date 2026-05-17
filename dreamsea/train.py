@@ -153,6 +153,8 @@ def train_ddpm(data_dir, model_type='conditional', epochs=500, batch_size=16,
                 
                 # Backward pass handled by accelerate
                 accelerator.backward(loss)
+                if accelerator.sync_gradients:
+                    accelerator.clip_grad_norm_(model.parameters(), 1.0)
                 optimizer.step()
                 optimizer.zero_grad()
                 
