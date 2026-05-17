@@ -1,6 +1,8 @@
 import os
 import argparse
 import time
+import traceback
+import urllib.request
 from pathlib import Path
 import torch
 import torch.nn.functional as F
@@ -8,6 +10,26 @@ from diffusers import DDPMScheduler
 from torch.utils.data import DataLoader, Dataset
 from accelerate import Accelerator
 from dreamsea.models import ConditionalDDPM, UnconditionalDDPM
+
+# --- Push notification helper (ntfy.sh) ---
+def send_ntfy(topic, title, message, priority="default", tags=""):
+    """Send a push notification via ntfy.sh. Fails silently if unavailable."""
+    if not topic:
+        return
+    try:
+        data = message.encode('utf-8')
+        req = urllib.request.Request(
+            f"https://ntfy.sh/{topic}",
+            data=data,
+            headers={
+                "Title": title,
+                "Priority": priority,
+                "Tags": tags,
+            },
+        )
+        urllib.request.urlopen(req, timeout=10)
+    except Exception:
+        pass  # Never let a notification failure crash training
 
 class PreprocessedDataset(Dataset):
     """Loads preprocessed RGBD tensors and condition vectors from disk."""
@@ -59,7 +81,7 @@ def train_ddpm(data_dir, model_type='conditional', epochs=500, batch_size=16,
                checkpoint_dir='checkpoints', save_every=50, resume_from=None, 
                device='cuda' if torch.cuda.is_available() else 'cpu', multi_gpu=False,
                learning_rate=1e-4, gradient_accumulation_steps=1, mixed_precision='fp16',
-               gradient_checkpointing=False):
+               gradient_checkpointing=False, ntfy_topic=None):
     """
     Training loop for DDPM models using preprocessed data.
     """
@@ -232,10 +254,9 @@ def train_ddpm(data_dir, model_type='conditional', epochs=500, batch_size=16,
                     )
                     optimizer.zero_grad()
                     if consecutive_nan_count >= max_consecutive_nan:
-                        accelerator.print(
-                            f"  [ERROR] {max_consecutive_nan} consecutive NaN batches. "
-                            f"Training is diverging — aborting."
-                        )
+                        msg = f"{max_consecutive_nan} consecutive NaN batches at epoch {epoch+1}. Training is diverging — aborting."
+                        accelerator.print(f"  [ERROR] {msg}")
+                        send_ntfy(ntfy_topic, "🔴 DreamSea CRASHED", msg, priority="urgent", tags="rotating_light")
                         return model
                     continue
                 else:
@@ -297,8 +318,14 @@ def train_ddpm(data_dir, model_type='conditional', epochs=500, batch_size=16,
                     'optimizer_state_dict': optimizer.state_dict(),
                 }, checkpoint_path)
                 print(f"--> Saved checkpoint: {checkpoint_path}")
+                send_ntfy(ntfy_topic, "💾 DreamSea Checkpoint",
+                          f"Saved {model_type} epoch {epoch+1}/{epochs} (loss: {avg_loss:.4f})",
+                          tags="floppy_disk")
 
     accelerator.print("\nTraining complete.")
+    send_ntfy(ntfy_topic, "✅ DreamSea DONE",
+              f"{model_type} training finished! {epochs} epochs, final loss: {avg_loss:.4f}",
+              priority="high", tags="white_check_mark")
     return model
 
 if __name__ == "__main__":
@@ -316,21 +343,29 @@ if __name__ == "__main__":
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Compute device.")
     parser.add_argument("--multi_gpu", action="store_true", help="Enable multi-GPU training if multiple GPUs are available.")
     parser.add_argument("--gradient_checkpointing", action="store_true", help="Enable to drastically reduce VRAM usage at the cost of speed.")
+    parser.add_argument("--ntfy_topic", type=str, default=None, help="ntfy.sh topic for push notifications (e.g. 'dreamsea_adam'). Install ntfy app on phone and subscribe to the same topic.")
 
     args = parser.parse_args()
 
-    train_ddpm(
-        data_dir=args.data_dir,
-        model_type=args.model_type,
-        epochs=args.epochs,
-        batch_size=args.batch_size,
-        learning_rate=args.learning_rate,
-        gradient_accumulation_steps=args.gradient_accumulation_steps,
-        mixed_precision=args.mixed_precision,
-        checkpoint_dir=args.checkpoint_dir,
-        save_every=args.save_every,
-        resume_from=args.resume_from,
-        device=args.device,
-        multi_gpu=args.multi_gpu,
-        gradient_checkpointing=args.gradient_checkpointing
-    )
+    try:
+        train_ddpm(
+            data_dir=args.data_dir,
+            model_type=args.model_type,
+            epochs=args.epochs,
+            batch_size=args.batch_size,
+            learning_rate=args.learning_rate,
+            gradient_accumulation_steps=args.gradient_accumulation_steps,
+            mixed_precision=args.mixed_precision,
+            checkpoint_dir=args.checkpoint_dir,
+            save_every=args.save_every,
+            resume_from=args.resume_from,
+            device=args.device,
+            multi_gpu=args.multi_gpu,
+            gradient_checkpointing=args.gradient_checkpointing,
+            ntfy_topic=args.ntfy_topic
+        )
+    except Exception as e:
+        error_msg = f"{type(e).__name__}: {e}"
+        print(f"\n[FATAL] {error_msg}")
+        send_ntfy(args.ntfy_topic, "\ud83d\udd34 DreamSea CRASHED", error_msg, priority="urgent", tags="rotating_light")
+        raise
