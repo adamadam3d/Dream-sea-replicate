@@ -1,6 +1,7 @@
 import os
 import argparse
 import math
+import time
 from pathlib import Path
 import torch
 import torch.nn.functional as F
@@ -126,19 +127,60 @@ def train_ddpm(data_dir, model_type='conditional', epochs=500, batch_size=16,
     accelerator.print(f"Batch size per device: {batch_size}, Epochs: {epochs}")
     accelerator.print(f"Gradient accumulation steps: {gradient_accumulation_steps}")
     accelerator.print(f"Mixed precision: {accelerator.mixed_precision}")
-    accelerator.print(f"Checkpoints will be saved to '{checkpoint_dir}' every {save_every} epochs.\n")
+    accelerator.print(f"Checkpoints will be saved to '{checkpoint_dir}' every {save_every} epochs.")
+
+    # --- Data sanity check: verify first batch looks correct ---
+    if accelerator.is_main_process:
+        sample_batch = next(iter(dataloader))
+        if model_type == 'conditional':
+            sample_images, sample_conds = sample_batch
+            print(f"\n[DEBUG] Data sanity check:")
+            print(f"  Image batch shape: {sample_images.shape}, dtype: {sample_images.dtype}")
+            print(f"  Image value range: [{sample_images.min().item():.3f}, {sample_images.max().item():.3f}] (expected ~[-1, 1])")
+            print(f"  Image mean: {sample_images.mean().item():.4f}, std: {sample_images.std().item():.4f}")
+            print(f"  Condition shape: {sample_conds.shape}, range: [{sample_conds.min().item():.3f}, {sample_conds.max().item():.3f}]")
+            print(f"  Contains NaN: {torch.isnan(sample_images).any().item()}, Contains Inf: {torch.isinf(sample_images).any().item()}")
+        else:
+            sample_images = sample_batch
+            print(f"\n[DEBUG] Data sanity check:")
+            print(f"  Image batch shape: {sample_images.shape}, dtype: {sample_images.dtype}")
+            print(f"  Image value range: [{sample_images.min().item():.3f}, {sample_images.max().item():.3f}] (expected ~[-1, 1])")
+            print(f"  Image mean: {sample_images.mean().item():.4f}, std: {sample_images.std().item():.4f}")
+            print(f"  Contains NaN: {torch.isnan(sample_images).any().item()}, Contains Inf: {torch.isinf(sample_images).any().item()}")
+        
+        # GPU info
+        if torch.cuda.is_available():
+            print(f"\n[DEBUG] GPU: {torch.cuda.get_device_name(0)}")
+            print(f"  Total VRAM: {torch.cuda.get_device_properties(0).total_mem / 1024**3:.1f} GB")
+            print(f"  Allocated: {torch.cuda.memory_allocated() / 1024**3:.2f} GB")
+            print(f"  Reserved:  {torch.cuda.memory_reserved() / 1024**3:.2f} GB")
+        
+        # Model parameter count
+        total_params = sum(p.numel() for p in model.parameters())
+        trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        print(f"\n[DEBUG] Model parameters: {total_params:,} total, {trainable_params:,} trainable")
+        print(f"[DEBUG] Learning rate: {learning_rate}")
+        print("")
 
     # Track consecutive NaN batches — if too many in a row, training is diverging
     max_consecutive_nan = 10
     consecutive_nan_count = 0
 
+    # Track loss history for trend monitoring
+    prev_avg_loss = None
+
     for epoch in range(start_epoch, epochs):
+        epoch_start_time = time.time()
+
         # Clear cache to prevent fragmentation on small VRAM GPUs
         if torch.cuda.is_available() and accelerator.is_main_process:
             torch.cuda.empty_cache()
             
         epoch_loss = 0.0
+        epoch_loss_min = float('inf')
+        epoch_loss_max = float('-inf')
         valid_steps = 0
+        max_grad_norm_epoch = 0.0
         
         for step, batch in enumerate(dataloader):
             with accelerator.accumulate(model):
@@ -194,18 +236,46 @@ def train_ddpm(data_dir, model_type='conditional', epochs=500, batch_size=16,
                 # Backward pass handled by accelerate
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
-                    accelerator.clip_grad_norm_(model.parameters(), 1.0)
+                    grad_norm = accelerator.clip_grad_norm_(model.parameters(), 1.0)
+                    if isinstance(grad_norm, torch.Tensor):
+                        grad_norm = grad_norm.item()
+                    max_grad_norm_epoch = max(max_grad_norm_epoch, grad_norm)
                 optimizer.step()
                 optimizer.zero_grad()
                 
-                # Accumulate average loss (only logging on main process later)
-                epoch_loss += loss.item()
+                # Accumulate loss stats
+                loss_val = loss.item()
+                epoch_loss += loss_val
+                epoch_loss_min = min(epoch_loss_min, loss_val)
+                epoch_loss_max = max(epoch_loss_max, loss_val)
                 valid_steps += 1
 
-        # Log average loss (only on main process to prevent duplicate prints)
+        # Log diagnostics (only on main process to prevent duplicate prints)
         if accelerator.is_main_process:
             avg_loss = epoch_loss / max(valid_steps, 1)
-            print(f"Epoch {epoch + 1}/{epochs} | Avg Loss: {avg_loss:.4f} ({valid_steps}/{len(dataloader)} valid steps)")
+            epoch_time = time.time() - epoch_start_time
+            
+            # Main log line
+            print(f"Epoch {epoch + 1}/{epochs} | Avg Loss: {avg_loss:.4f} | "
+                  f"Min/Max: {epoch_loss_min:.4f}/{epoch_loss_max:.4f} | "
+                  f"Grad Norm: {max_grad_norm_epoch:.2f} | "
+                  f"Steps: {valid_steps}/{len(dataloader)} | "
+                  f"Time: {epoch_time:.1f}s")
+            
+            # Loss trend warning
+            if prev_avg_loss is not None:
+                loss_change = (avg_loss - prev_avg_loss) / max(prev_avg_loss, 1e-8)
+                if loss_change > 0.5:  # Loss jumped by more than 50%
+                    print(f"  [WARN] Loss spiked by {loss_change*100:.0f}% from previous epoch!")
+                if avg_loss > 1.0:
+                    print(f"  [WARN] Loss is unusually high ({avg_loss:.4f}). Model may be unstable.")
+            prev_avg_loss = avg_loss
+            
+            # GPU memory (every 50 epochs to avoid clutter)
+            if torch.cuda.is_available() and (epoch + 1) % 50 == 0:
+                print(f"  [DEBUG] GPU Memory - Allocated: {torch.cuda.memory_allocated() / 1024**3:.2f} GB, "
+                      f"Reserved: {torch.cuda.memory_reserved() / 1024**3:.2f} GB, "
+                      f"Peak: {torch.cuda.max_memory_allocated() / 1024**3:.2f} GB")
 
             # Checkpointing — save optimizer state alongside model for safe resumption
             if (epoch + 1) % save_every == 0 or (epoch + 1) == epochs:

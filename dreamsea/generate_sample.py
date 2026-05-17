@@ -7,20 +7,16 @@ from dreamsea.generation_inpainting import GeneratorInpainter
 
 def normalize_tensor_to_image(tensor):
     """
-    Converts a PyTorch tensor in range [-1, 1] or roughly Normal(0, 1) 
-    into a valid [0, 255] uint8 numpy image.
+    Converts a PyTorch tensor in range [-1, 1] into a valid [0, 255] uint8 numpy image.
     """
     # Detach and move to CPU
     image_np = tensor.detach().cpu().numpy()
     
-    # Simple min-max normalization to [0, 1] for visualization
-    img_min = image_np.min()
-    img_max = image_np.max()
+    # Map from [-1, 1] to [0, 1]
+    image_np = (image_np + 1.0) / 2.0
     
-    if img_max > img_min:
-        image_np = (image_np - img_min) / (img_max - img_min)
-    else:
-        image_np = np.zeros_like(image_np)
+    # Clip to ensure valid range [0, 1]
+    image_np = np.clip(image_np, 0.0, 1.0)
         
     # Scale to [0, 255] and convert to uint8
     image_np = (image_np * 255).astype(np.uint8)
