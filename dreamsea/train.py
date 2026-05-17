@@ -3,6 +3,7 @@ import argparse
 import time
 import traceback
 import urllib.request
+import json
 from pathlib import Path
 import torch
 import torch.nn.functional as F
@@ -17,18 +18,27 @@ def send_ntfy(topic, title, message, priority="default", tags=""):
     if not topic:
         return
     try:
-        data = message.encode('utf-8')
+        # Convert priority string to ntfy integer levels
+        prio_map = {"min": 1, "low": 2, "default": 3, "high": 4, "urgent": 5}
+        prio_int = prio_map.get(priority, 3)
+        
+        payload = {
+            "topic": topic,
+            "message": message,
+            "title": title,
+            "priority": prio_int
+        }
+        if tags:
+            payload["tags"] = [tags]
+
+        data = json.dumps(payload).encode('utf-8')
         req = urllib.request.Request(
-            f"https://ntfy.sh/{topic}",
+            "https://ntfy.sh/",
             data=data,
-            headers={
-                "Title": title,
-                "Priority": priority,
-                "Tags": tags,
-            },
+            headers={"Content-Type": "application/json"}
         )
         urllib.request.urlopen(req, timeout=10)
-    except Exception:
+    except Exception as e:
         pass  # Never let a notification failure crash training
 
 class PreprocessedDataset(Dataset):
