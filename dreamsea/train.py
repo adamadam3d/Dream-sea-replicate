@@ -214,128 +214,150 @@ def train_ddpm(data_dir, model_type='conditional', epochs=500, batch_size=16,
     # Track loss history for trend monitoring
     prev_avg_loss = None
 
-    for epoch in range(start_epoch, epochs):
-        epoch_start_time = time.time()
+    try:
+        for epoch in range(start_epoch, epochs):
+            epoch_start_time = time.time()
 
-        # Clear cache to prevent fragmentation on small VRAM GPUs
-        if torch.cuda.is_available() and accelerator.is_main_process:
-            torch.cuda.empty_cache()
+            # Clear cache to prevent fragmentation on small VRAM GPUs
+            if torch.cuda.is_available() and accelerator.is_main_process:
+                torch.cuda.empty_cache()
+                
+            epoch_loss = 0.0
+            epoch_loss_min = float('inf')
+            epoch_loss_max = float('-inf')
+            valid_steps = 0
+            max_grad_norm_epoch = 0.0
             
-        epoch_loss = 0.0
-        epoch_loss_min = float('inf')
-        epoch_loss_max = float('-inf')
-        valid_steps = 0
-        max_grad_norm_epoch = 0.0
-        
-        for step, batch in enumerate(dataloader):
-            with accelerator.accumulate(model):
-                if model_type == 'conditional':
-                    clean_images, conditions = batch
-                    # Conditions need reshaping
-                    conditions = conditions.view(clean_images.shape[0], 1, 2)
-                else:
-                    clean_images = batch
+            for step, batch in enumerate(dataloader):
+                with accelerator.accumulate(model):
+                    if model_type == 'conditional':
+                        clean_images, conditions = batch
+                        # Conditions need reshaping
+                        conditions = conditions.view(clean_images.shape[0], 1, 2)
+                    else:
+                        clean_images = batch
 
-                # Sanity check: skip batches with NaN/Inf in input data
-                if torch.isnan(clean_images).any() or torch.isinf(clean_images).any():
-                    accelerator.print(f"  [WARN] Epoch {epoch+1}, step {step}: NaN/Inf in input data, skipping batch.")
-                    continue
+                    # Sanity check: skip batches with NaN/Inf in input data
+                    if torch.isnan(clean_images).any() or torch.isinf(clean_images).any():
+                        accelerator.print(f"  [WARN] Epoch {epoch+1}, step {step}: NaN/Inf in input data, skipping batch.")
+                        continue
 
-                # Sample noise
-                noise = torch.randn(clean_images.shape, device=clean_images.device)
-                bs = clean_images.shape[0]
-                timesteps = torch.randint(
-                    0, noise_scheduler.config.num_train_timesteps, (bs,), device=clean_images.device
-                ).long()
+                    # Sample noise
+                    noise = torch.randn(clean_images.shape, device=clean_images.device)
+                    bs = clean_images.shape[0]
+                    timesteps = torch.randint(
+                        0, noise_scheduler.config.num_train_timesteps, (bs,), device=clean_images.device
+                    ).long()
 
-                # Add noise
-                noisy_images = noise_scheduler.add_noise(clean_images, noise, timesteps)
+                    # Add noise
+                    noisy_images = noise_scheduler.add_noise(clean_images, noise, timesteps)
 
-                # Predict the noise residual
-                if model_type == 'conditional':
-                    noise_pred = model(noisy_images, timesteps, encoder_hidden_states=conditions)
-                else:
-                    noise_pred = model(noisy_images, timesteps)
-                
-                # Compute loss
-                loss = F.mse_loss(noise_pred, noise)
-                
-                # NaN loss detection: skip this batch to prevent poisoning the optimizer state
-                if torch.isnan(loss) or torch.isinf(loss):
-                    consecutive_nan_count += 1
-                    accelerator.print(
-                        f"  [WARN] Epoch {epoch+1}, step {step}: NaN/Inf loss detected "
-                        f"({consecutive_nan_count}/{max_consecutive_nan} consecutive). Skipping batch."
-                    )
+                    # Predict the noise residual
+                    if model_type == 'conditional':
+                        noise_pred = model(noisy_images, timesteps, encoder_hidden_states=conditions)
+                    else:
+                        noise_pred = model(noisy_images, timesteps)
+                    
+                    # Compute loss
+                    loss = F.mse_loss(noise_pred, noise)
+                    
+                    # NaN loss detection: skip this batch to prevent poisoning the optimizer state
+                    if torch.isnan(loss) or torch.isinf(loss):
+                        consecutive_nan_count += 1
+                        accelerator.print(
+                            f"  [WARN] Epoch {epoch+1}, step {step}: NaN/Inf loss detected "
+                            f"({consecutive_nan_count}/{max_consecutive_nan} consecutive). Skipping batch."
+                        )
+                        optimizer.zero_grad()
+                        if consecutive_nan_count >= max_consecutive_nan:
+                            msg = f"{max_consecutive_nan} consecutive NaN batches at epoch {epoch+1}. Training is diverging — aborting."
+                            accelerator.print(f"  [ERROR] {msg}")
+                            send_ntfy(ntfy_topic, f"🔴 {model_type} CRASHED", msg, priority="urgent", tags="rotating_light")
+                            return model
+                        continue
+                    else:
+                        consecutive_nan_count = 0
+                    
+                    # Backward pass handled by accelerate
+                    accelerator.backward(loss)
+                    if accelerator.sync_gradients:
+                        grad_norm = accelerator.clip_grad_norm_(model.parameters(), 1.0)
+                        if isinstance(grad_norm, torch.Tensor):
+                            grad_norm = grad_norm.item()
+                        max_grad_norm_epoch = max(max_grad_norm_epoch, grad_norm)
+                    optimizer.step()
                     optimizer.zero_grad()
-                    if consecutive_nan_count >= max_consecutive_nan:
-                        msg = f"{max_consecutive_nan} consecutive NaN batches at epoch {epoch+1}. Training is diverging — aborting."
-                        accelerator.print(f"  [ERROR] {msg}")
-                        send_ntfy(ntfy_topic, f"🔴 {model_type} CRASHED", msg, priority="urgent", tags="rotating_light")
-                        return model
-                    continue
-                else:
-                    consecutive_nan_count = 0
-                
-                # Backward pass handled by accelerate
-                accelerator.backward(loss)
-                if accelerator.sync_gradients:
-                    grad_norm = accelerator.clip_grad_norm_(model.parameters(), 1.0)
-                    if isinstance(grad_norm, torch.Tensor):
-                        grad_norm = grad_norm.item()
-                    max_grad_norm_epoch = max(max_grad_norm_epoch, grad_norm)
-                optimizer.step()
-                optimizer.zero_grad()
-                
-                # Accumulate loss stats
-                loss_val = loss.item()
-                epoch_loss += loss_val
-                epoch_loss_min = min(epoch_loss_min, loss_val)
-                epoch_loss_max = max(epoch_loss_max, loss_val)
-                valid_steps += 1
+                    
+                    # Accumulate loss stats
+                    loss_val = loss.item()
+                    epoch_loss += loss_val
+                    epoch_loss_min = min(epoch_loss_min, loss_val)
+                    epoch_loss_max = max(epoch_loss_max, loss_val)
+                    valid_steps += 1
 
-        # Log diagnostics (only on main process to prevent duplicate prints)
+            # Log diagnostics (only on main process to prevent duplicate prints)
+            if accelerator.is_main_process:
+                avg_loss = epoch_loss / max(valid_steps, 1)
+                epoch_time = time.time() - epoch_start_time
+                
+                # Main log line
+                print(f"Epoch {epoch + 1}/{epochs} | Avg Loss: {avg_loss:.4f} | "
+                      f"Min/Max: {epoch_loss_min:.4f}/{epoch_loss_max:.4f} | "
+                      f"Grad Norm: {max_grad_norm_epoch:.2f} | "
+                      f"Steps: {valid_steps}/{len(dataloader)} | "
+                      f"Time: {epoch_time:.1f}s")
+                
+                # Loss trend warning
+                if prev_avg_loss is not None:
+                    loss_change = (avg_loss - prev_avg_loss) / max(prev_avg_loss, 1e-8)
+                    if loss_change > 0.5:  # Loss jumped by more than 50%
+                        print(f"  [WARN] Loss spiked by {loss_change*100:.0f}% from previous epoch!")
+                    if avg_loss > 1.0:
+                        print(f"  [WARN] Loss is unusually high ({avg_loss:.4f}). Model may be unstable.")
+                prev_avg_loss = avg_loss
+                
+                # GPU memory (every 50 epochs to avoid clutter)
+                if torch.cuda.is_available() and (epoch + 1) % 50 == 0:
+                    print(f"  [DEBUG] GPU Memory - Allocated: {torch.cuda.memory_allocated() / 1024**3:.2f} GB, "
+                          f"Reserved: {torch.cuda.memory_reserved() / 1024**3:.2f} GB, "
+                          f"Peak: {torch.cuda.max_memory_allocated() / 1024**3:.2f} GB")
+
+                # Checkpointing — save optimizer state alongside model for safe resumption
+                if (epoch + 1) % save_every == 0 or (epoch + 1) == epochs:
+                    checkpoint_path = os.path.join(checkpoint_dir, f"{model_type}_epoch_{epoch+1}.pt")
+                    
+                    # Unwrap model before saving to ensure clean state dict
+                    unwrapped_model = accelerator.unwrap_model(model)
+                    torch.save({
+                        'epoch': epoch + 1,
+                        'model_state_dict': unwrapped_model.state_dict(),
+                        'optimizer_state_dict': optimizer.state_dict(),
+                    }, checkpoint_path)
+                    print(f"--> Saved checkpoint: {checkpoint_path}")
+                    send_ntfy(ntfy_topic, f"💾 {model_type} checkpoint",
+                              f"Epoch {epoch+1}/{epochs} | loss: {avg_loss:.4f}",
+                              tags="floppy_disk")
+
+    except KeyboardInterrupt:
+        accelerator.print("\n[INFO] Training interrupted by user. Saving current state...")
+        # We use epoch + 1 as the current epoch being worked on
+        current_epoch = epoch + 1
+        checkpoint_path = os.path.join(checkpoint_dir, f"{model_type}_interrupted_epoch_{current_epoch}.pt")
+        
         if accelerator.is_main_process:
-            avg_loss = epoch_loss / max(valid_steps, 1)
-            epoch_time = time.time() - epoch_start_time
-            
-            # Main log line
-            print(f"Epoch {epoch + 1}/{epochs} | Avg Loss: {avg_loss:.4f} | "
-                  f"Min/Max: {epoch_loss_min:.4f}/{epoch_loss_max:.4f} | "
-                  f"Grad Norm: {max_grad_norm_epoch:.2f} | "
-                  f"Steps: {valid_steps}/{len(dataloader)} | "
-                  f"Time: {epoch_time:.1f}s")
-            
-            # Loss trend warning
-            if prev_avg_loss is not None:
-                loss_change = (avg_loss - prev_avg_loss) / max(prev_avg_loss, 1e-8)
-                if loss_change > 0.5:  # Loss jumped by more than 50%
-                    print(f"  [WARN] Loss spiked by {loss_change*100:.0f}% from previous epoch!")
-                if avg_loss > 1.0:
-                    print(f"  [WARN] Loss is unusually high ({avg_loss:.4f}). Model may be unstable.")
-            prev_avg_loss = avg_loss
-            
-            # GPU memory (every 50 epochs to avoid clutter)
-            if torch.cuda.is_available() and (epoch + 1) % 50 == 0:
-                print(f"  [DEBUG] GPU Memory - Allocated: {torch.cuda.memory_allocated() / 1024**3:.2f} GB, "
-                      f"Reserved: {torch.cuda.memory_reserved() / 1024**3:.2f} GB, "
-                      f"Peak: {torch.cuda.max_memory_allocated() / 1024**3:.2f} GB")
-
-            # Checkpointing — save optimizer state alongside model for safe resumption
-            if (epoch + 1) % save_every == 0 or (epoch + 1) == epochs:
-                checkpoint_path = os.path.join(checkpoint_dir, f"{model_type}_epoch_{epoch+1}.pt")
-                
-                # Unwrap model before saving to ensure clean state dict
-                unwrapped_model = accelerator.unwrap_model(model)
-                torch.save({
-                    'epoch': epoch + 1,
-                    'model_state_dict': unwrapped_model.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                }, checkpoint_path)
-                print(f"--> Saved checkpoint: {checkpoint_path}")
-                send_ntfy(ntfy_topic, f"💾 {model_type} checkpoint",
-                          f"Epoch {epoch+1}/{epochs} | loss: {avg_loss:.4f}",
-                          tags="floppy_disk")
+            unwrapped_model = accelerator.unwrap_model(model)
+            torch.save({
+                'epoch': current_epoch,
+                'model_state_dict': unwrapped_model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+            }, checkpoint_path)
+            print(f"--> Saved interrupted checkpoint: {checkpoint_path}")
+            print(f"To resume training, use: --resume_from {checkpoint_path}")
+            send_ntfy(ntfy_topic, f"⏸️ {model_type} INTERRUPTED",
+                      f"Training stopped at epoch {current_epoch}. Progress saved.",
+                      tags="pause_button")
+        
+        return model
 
     accelerator.print("\nTraining complete.")
     send_ntfy(ntfy_topic, f"✅ {model_type} DONE",
