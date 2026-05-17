@@ -10,13 +10,19 @@ class GeneratorInpainter:
         # Load conditional DDPM
         self.cond_model = ConditionalDDPM().to(device)
         if cond_model_path:
-            self.cond_model.load_state_dict(torch.load(cond_model_path, map_location=device))
+            state_dict = torch.load(cond_model_path, map_location=device, weights_only=True)
+            # Remove 'module.' prefix if it exists from multi-GPU training
+            clean_state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
+            self.cond_model.load_state_dict(clean_state_dict)
         self.cond_model.eval()
 
         # Load unconditional DDPM
         self.uncond_model = UnconditionalDDPM().to(device)
         if uncond_model_path:
-            self.uncond_model.load_state_dict(torch.load(uncond_model_path, map_location=device))
+            state_dict = torch.load(uncond_model_path, map_location=device, weights_only=True)
+            # Remove 'module.' prefix if it exists
+            clean_state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
+            self.uncond_model.load_state_dict(clean_state_dict)
         self.uncond_model.eval()
 
         self.scheduler = DDPMScheduler(num_train_timesteps=1000)
