@@ -28,6 +28,24 @@ def export_to_ply(checkpoint_path, output_path):
     opacity = state_dict['opacity'].detach().cpu().numpy()
     scale = state_dict['scaling'].detach().cpu().numpy()
     rotation = state_dict['rotation'].detach().cpu().numpy()
+    
+    # ------------------------------------------------------------------
+    # Standard 3DGS Viewer Conversions
+    # 1. Colors: Viewers expect Spherical Harmonics DC terms. 
+    #    Formula: Color = SH_C0 * f_dc + 0.5
+    #    Since our f_dc is currently raw RGB [0, 1], we must invert this:
+    SH_C0 = 0.28209479177387814
+    f_dc = (f_dc - 0.5) / SH_C0
+    
+    # 2. Scale: Viewers apply exp(scale) to the saved values.
+    #    Since our scaling was raw (e.g., 0.01), we need to save log(scale).
+    scale = np.log(np.clip(scale, 1e-10, None))
+    
+    # 3. Opacity: Viewers apply sigmoid(opacity).
+    #    Since our opacity was raw (e.g., 0.1), we need to save inverse_sigmoid(opacity).
+    opacity = np.clip(opacity, 1e-5, 1 - 1e-5)
+    opacity = np.log(opacity / (1.0 - opacity))
+    # ------------------------------------------------------------------
 
     # Construct the attribute list for 3DGS .ply
     # x, y, z, nx, ny, nz, f_dc_0, f_dc_1, f_dc_2, opacity, scale_0, scale_1, scale_2, rot_0, rot_1, rot_2, rot_3
