@@ -69,9 +69,12 @@ def generate_3dgs(cond_ckpt, uncond_ckpt, grid_size=3, roughness=0.5,
     )
 
     # 6. Save Results
-    # In a real implementation, we would save the .ply or .pt file of the gaussians.
+    # We save a dictionary that includes positions so the .pt can be converted to .ply
     final_path = os.path.join(output_dir, "final_gs_model.pt")
-    torch.save(gs_model.state_dict(), final_path)
+    save_dict = gs_model.state_dict()
+    save_dict['positions'] = gs_model.positions.cpu() # Add positions to the save file
+    
+    torch.save(save_dict, final_path)
     print(f"\nSuccess! 3DGS generation complete.")
     print(f"Final model saved to: {final_path}")
 
