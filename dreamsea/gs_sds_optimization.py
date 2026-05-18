@@ -27,11 +27,11 @@ class GaussianSplattingModel(nn.Module):
         """
         Dummy forward pass representing a 3DGS rasterization.
         In a full implementation, this calls the CUDA rasterizer.
-        Returns a rendered RGB image (and depth).
+        Returns a rendered RGBD image.
         """
         # Placeholder for rendering
-        # Just returning random image matching camera res
-        return torch.randn(1, 3, 224, 224).to(self.device)
+        # Returning RGBD image matching camera res (4 channels)
+        return torch.randn(1, 4, 224, 224).to(self.device)
 
 def create_point_cloud_from_rgbd(rgbd_map, fov=60.0):
     """
@@ -73,7 +73,7 @@ def create_point_cloud_from_rgbd(rgbd_map, fov=60.0):
 def compute_sds_loss(diffusion_model, scheduler, rendered_image, text_embeddings=None):
     """
     Computes Score Distillation Sampling (SDS) loss using a 2D diffusion prior.
-    rendered_image: (1, 3, H, W)
+    rendered_image: (1, 4, H, W) - RGBD
     """
     # In SDS, we do not backprop through the diffusion model.
     # We add noise, predict noise, and compute gradient for the input image.
