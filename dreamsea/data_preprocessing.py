@@ -7,12 +7,12 @@ from sklearn.decomposition import PCA
 class DataPreprocessor:
     def __init__(self, device='cuda' if torch.cuda.is_available() else 'cpu'):
         self.device = device
-        # Load Depth Anything v2 (we use the small model for this implementation)
-        self.depth_estimator = pipeline(task="depth-estimation", model="depth-anything/Depth-Anything-V2-Small-hf", device=device)
+        # Load Depth Anything v2 (Large model for higher quality depth estimation)
+        self.depth_estimator = pipeline(task="depth-estimation", model="depth-anything/Depth-Anything-V2-Large-hf", device=device)
 
         # Load DINOv2
-        self.dino_processor = AutoImageProcessor.from_pretrained('facebook/dinov2-small')
-        self.dino_model = AutoModel.from_pretrained('facebook/dinov2-small').to(self.device)
+        self.dino_processor = AutoImageProcessor.from_pretrained('facebook/dinov2-large')
+        self.dino_model = AutoModel.from_pretrained('facebook/dinov2-large').to(self.device)
         self.pca = PCA(n_components=2)
 
     def process_rgb_to_rgbd(self, image_path):

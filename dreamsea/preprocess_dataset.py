@@ -1,6 +1,7 @@
 import os
 import glob
 import torch
+import torch.nn.functional as F
 import joblib
 from pathlib import Path
 from dreamsea.data_preprocessing import DataPreprocessor
@@ -57,6 +58,15 @@ def preprocess_dataset(input_dir: str, output_dir: str, device: str = 'cuda'):
         # Process and save RGBD tensor
         try:
             rgbd_tensor = preprocessor.process_rgb_to_rgbd(path_str)
+            # Squeeze batch dim: [1, 4, H, W] -> [4, H, W]
+            while rgbd_tensor.dim() > 3 and rgbd_tensor.shape[0] == 1:
+                rgbd_tensor = rgbd_tensor.squeeze(0)
+            # Resize to 224x224 now so we don't repeat this every epoch
+            if rgbd_tensor.shape[-2:] != (224, 224):
+                rgbd_tensor = F.interpolate(
+                    rgbd_tensor.unsqueeze(0), size=(224, 224),
+                    mode='bilinear', align_corners=False
+                ).squeeze(0)
             rgbd_save_path = rgbd_out_dir / f"{base_name}_rgbd.pt"
             # Ensure tensor is saved to CPU to save GPU memory during dataloading later
             torch.save(rgbd_tensor.cpu(), rgbd_save_path)
