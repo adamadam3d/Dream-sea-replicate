@@ -27,8 +27,15 @@ def gray_world_white_balance(img):
     result[:, :, 1] = result[:, :, 1] * (avg_gray / (avg_g + 1e-6))
     result[:, :, 2] = result[:, :, 2] * (avg_gray / (avg_r + 1e-6))
     
-    # Clip values to valid [0, 255] range and convert back to uint8
-    return np.clip(result, 0, 255).astype(np.uint8)
+    # Fix Overexposure: If the scaling pushed values above 255, 
+    # scale the entire image down so the brightest pixel hits exactly 255.
+    # This preserves the color ratios without clipping (blowing out) the highlights.
+    max_val = np.max(result)
+    if max_val > 255.0:
+        result = result * (255.0 / max_val)
+    
+    # Convert back to uint8
+    return result.astype(np.uint8)
 
 def apply_clahe(img, clip_limit=2.0, tile_grid_size=(8, 8)):
     """
@@ -54,7 +61,46 @@ def apply_clahe(img, clip_limit=2.0, tile_grid_size=(8, 8)):
     enhanced_img = cv2.cvtColor(limg, cv2.COLOR_LAB2BGR)
     return enhanced_img
 
-def process_image(img_path, output_path, use_gw=True, use_clahe=True):
+def apply_msrcr(img, sigmas=[15, 80, 250], alpha=125.0, beta=46.0):
+    """
+    Applies Multi-Scale Retinex with Color Restoration (MSRCR).
+    Mimics human color constancy. Excellent for removing varying illumination
+    like AUV active strobe lights hotspots.
+    """
+    # 1. Convert to float and add 1 to avoid log(0)
+    img_float = img.astype(np.float32) + 1.0
+    
+    # 2. Extract log-transformed channels and apply multi-scale retinex (MSR)
+    msr = np.zeros_like(img_float)
+    for sigma in sigmas:
+        # Gaussian blur to estimate illumination
+        blur = cv2.GaussianBlur(img_float, (0, 0), sigma)
+        # Subtract log-blurred from log-original
+        msr += np.log10(img_float) - np.log10(blur)
+    
+    # Average the scales
+    msr = msr / len(sigmas)
+    
+    # 3. Compute Color Restoration Function (CRF) to prevent desaturation
+    img_sum = np.sum(img_float, axis=2, keepdims=True)
+    crf = beta * (np.log10(alpha * img_float) - np.log10(img_sum))
+    
+    # 4. Multiply MSR by CRF
+    msrcr = msr * crf
+    
+    # 5. Final linear contrast stretch to [0, 255]
+    result = np.zeros_like(img_float)
+    for i in range(3):
+        channel = msrcr[:, :, i]
+        # Use 1st and 99th percentiles to avoid outliers ruining the stretch
+        min_val = np.percentile(channel, 1)
+        max_val = np.percentile(channel, 99)
+        channel_stretched = np.clip((channel - min_val) / (max_val - min_val + 1e-6) * 255.0, 0, 255)
+        result[:, :, i] = channel_stretched
+        
+    return result.astype(np.uint8)
+
+def process_image(img_path, output_path, use_gw=True, use_clahe=True, use_msrcr=False):
     """Reads an image, applies selected enhancements, and saves it."""
     # Read image in BGR format
     img = cv2.imread(str(img_path))
@@ -64,24 +110,29 @@ def process_image(img_path, output_path, use_gw=True, use_clahe=True):
         
     result = img.copy()
     
-    # 1. Neutralize color casts (Gray World)
-    if use_gw:
-        result = gray_world_white_balance(result)
-        
-    # 2. Enhance local contrast (CLAHE)
-    if use_clahe:
-        result = apply_clahe(result)
+    if use_msrcr:
+        # MSRCR is a comprehensive enhancement, usually applied on its own.
+        result = apply_msrcr(result)
+    else:
+        # 1. Neutralize color casts (Gray World)
+        if use_gw:
+            result = gray_world_white_balance(result)
+            
+        # 2. Enhance local contrast (CLAHE)
+        if use_clahe:
+            result = apply_clahe(result)
         
     # Save output
     cv2.imwrite(str(output_path), result)
     return True
 
 def main():
-    parser = argparse.ArgumentParser(description="Underwater Image Enhancement (Gray World + CLAHE)")
+    parser = argparse.ArgumentParser(description="Underwater Image Enhancement (Gray World + CLAHE or MSRCR)")
     parser.add_argument("--input", "-i", type=str, required=True, help="Path to input image or directory")
     parser.add_argument("--output", "-o", type=str, required=True, help="Path to save enhanced image(s)")
     parser.add_argument("--no_gw", action="store_true", help="Disable Gray World White Balancing")
     parser.add_argument("--no_clahe", action="store_true", help="Disable CLAHE enhancement")
+    parser.add_argument("--use_msrcr", action="store_true", help="Use Multi-Scale Retinex with Color Restoration instead of GW+CLAHE")
     
     args = parser.parse_args()
     
@@ -90,6 +141,7 @@ def main():
     
     use_gw = not args.no_gw
     use_clahe = not args.no_clahe
+    use_msrcr = args.use_msrcr
     
     if input_path.is_file():
         # Process a single file
@@ -99,7 +151,7 @@ def main():
         if output_path.is_dir():
             output_path = output_path / input_path.name
             
-        success = process_image(input_path, output_path, use_gw, use_clahe)
+        success = process_image(input_path, output_path, use_gw, use_clahe, use_msrcr)
         if success:
             print(f"Successfully enhanced: {output_path}")
             
@@ -122,7 +174,7 @@ def main():
         success_count = 0
         for p in image_paths:
             out_file = output_path / p.name
-            if process_image(p, out_file, use_gw, use_clahe):
+            if process_image(p, out_file, use_gw, use_clahe, use_msrcr):
                 success_count += 1
                 
         print(f"\nFinished processing! Successfully enhanced {success_count}/{len(image_paths)} images.")

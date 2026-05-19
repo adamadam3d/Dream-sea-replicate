@@ -63,7 +63,14 @@ class PreprocessedDataset(Dataset):
         rgbd_path = self.rgbd_files[idx]
         image = torch.load(rgbd_path, weights_only=True)
         
-        # Preprocessing already saves as [4, 224, 224] in [0, 1] range.
+        # Fallback for old preprocessed data that wasn't squeezed
+        while image.dim() > 3 and image.shape[0] == 1:
+            image = image.squeeze(0)
+            
+        # Fallback resize for old data
+        if image.shape[-2:] != (224, 224):
+            image = F.interpolate(image.unsqueeze(0), size=(224, 224), mode='bilinear', align_corners=False).squeeze(0)
+            
         # Scale from [0, 1] to [-1, 1] (Crucial for Diffusion stability)
         image = image * 2.0 - 1.0
         
