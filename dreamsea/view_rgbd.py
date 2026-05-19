@@ -35,17 +35,18 @@ DEPTH_CMAPS = ['magma', 'viridis', 'inferno', 'plasma', 'cividis', 'turbo']
 
 
 class RGBDViewer:
-    """Interactive side-by-side RGB vs Depth viewer."""
+    """Interactive side-by-side RGB vs Depth viewer with lazy loading."""
 
-    def __init__(self, rgbd_tensors: list, names: list, output_dir: str = None):
+    def __init__(self, paths: list, names: list, output_dir: str = None):
         """
         Args:
-            rgbd_tensors: List of tensors, each [4, H, W] with values in [0, 1].
+            paths: List of file paths to [4, H, W] .pt tensors (loaded on demand).
             names: List of display names for each tensor.
             output_dir: Optional directory to save screenshots into.
         """
-        self.tensors = rgbd_tensors
+        self.paths = paths
         self.names = names
+        self.count = len(paths)
         self.output_dir = Path(output_dir) if output_dir else Path(".")
         self.idx = 0
         self.cmap_idx = 0
@@ -82,9 +83,17 @@ class RGBDViewer:
         self._render()
         plt.show()
 
+    def _load_tensor(self, idx):
+        """Lazy-load a single tensor from disk."""
+        t = torch.load(self.paths[idx], map_location='cpu', weights_only=True).float()
+        # Handle legacy [1, 4, H, W] format
+        while t.dim() > 3 and t.shape[0] == 1:
+            t = t.squeeze(0)
+        return t
+
     def _render(self):
         """Draw the current image pair."""
-        tensor = self.tensors[self.idx]  # [4, H, W], values in [0, 1]
+        tensor = self._load_tensor(self.idx)  # [4, H, W], values in [0, 1]
         name = self.names[self.idx]
 
         rgb = tensor[:3].permute(1, 2, 0).numpy()    # [H, W, 3]
@@ -144,23 +153,23 @@ class RGBDViewer:
         # ── Supertitle ──
         h, w = tensor.shape[1], tensor.shape[2]
         self.suptitle.set_text(
-            f'{name}   [{self.idx + 1}/{len(self.tensors)}]   •   {w}×{h}   •   tensor [4, {h}, {w}]'
+            f'{name}   [{self.idx + 1}/{self.count}]   •   {w}×{h}   •   tensor [4, {h}, {w}]'
         )
 
         self.fig.canvas.draw_idle()
 
     def _on_key(self, event):
         if event.key in ('right', 'd'):
-            self.idx = (self.idx + 1) % len(self.tensors)
+            self.idx = (self.idx + 1) % self.count
             self._render()
         elif event.key in ('left', 'a'):
-            self.idx = (self.idx - 1) % len(self.tensors)
+            self.idx = (self.idx - 1) % self.count
             self._render()
         elif event.key == 'home':
             self.idx = 0
             self._render()
         elif event.key == 'end':
-            self.idx = len(self.tensors) - 1
+            self.idx = self.count - 1
             self._render()
         elif event.key == 'c':
             self.cmap_idx = (self.cmap_idx + 1) % len(DEPTH_CMAPS)
@@ -177,7 +186,7 @@ class RGBDViewer:
 # ─── Loading helpers ──────────────────────────────────────────────────
 
 def load_preprocessed(data_dir: str):
-    """Load RGBD tensors from a preprocessed output directory."""
+    """Return paths and names for preprocessed RGBD tensors (lazy-loaded by viewer)."""
     rgbd_dir = Path(data_dir) / "rgbd"
     if not rgbd_dir.exists():
         print(f"Error: No 'rgbd' folder found in {data_dir}")
@@ -188,23 +197,17 @@ def load_preprocessed(data_dir: str):
         print(f"Error: No .pt files found in {rgbd_dir}")
         sys.exit(1)
 
-    tensors = []
-    names = []
-    for f in pt_files:
-        t = torch.load(f, map_location='cpu', weights_only=True).float()
-        # Handle legacy [1, 4, H, W] format
-        while t.dim() > 3 and t.shape[0] == 1:
-            t = t.squeeze(0)
-        tensors.append(t)
-        names.append(f.stem.replace('_rgbd', ''))
+    paths = [str(f) for f in pt_files]
+    names = [f.stem.replace('_rgbd', '') for f in pt_files]
 
-    print(f"Loaded {len(tensors)} preprocessed RGBD tensors from {rgbd_dir}")
-    return tensors, names
+    print(f"Found {len(paths)} preprocessed RGBD tensors in {rgbd_dir} (lazy-loaded)")
+    return paths, names
 
 
 def load_raw(raw_dir: str, device: str = 'cpu'):
-    """Load raw images, run depth estimation live, and return RGBD tensors."""
+    """Process raw images with depth estimation and cache to temp .pt files for lazy viewing."""
     import glob
+    import tempfile
     from dreamsea.data_preprocessing import DataPreprocessor
 
     raw_path = Path(raw_dir)
@@ -218,25 +221,30 @@ def load_raw(raw_dir: str, device: str = 'cpu'):
         print(f"Error: No images found in {raw_dir}")
         sys.exit(1)
 
-    print(f"Found {len(image_paths)} images. Running depth estimation...")
+    # Create a temp directory to cache processed tensors
+    cache_dir = Path(tempfile.mkdtemp(prefix='dreamsea_viewer_'))
+    print(f"Found {len(image_paths)} images. Running depth estimation (cache: {cache_dir})...")
     preprocessor = DataPreprocessor(device=device)
 
-    tensors = []
+    paths = []
     names = []
-    for i, path in enumerate(image_paths):
+    for i, img_path in enumerate(image_paths):
         try:
-            t = preprocessor.process_rgb_to_rgbd(path).cpu().float()
+            t = preprocessor.process_rgb_to_rgbd(img_path).cpu().float()
             while t.dim() > 3 and t.shape[0] == 1:
                 t = t.squeeze(0)
-            tensors.append(t)
-            names.append(Path(path).stem)
+            stem = Path(img_path).stem
+            cache_path = cache_dir / f"{stem}_rgbd.pt"
+            torch.save(t, cache_path)
+            paths.append(str(cache_path))
+            names.append(stem)
             if (i + 1) % 5 == 0:
                 print(f"  Processed {i + 1}/{len(image_paths)}")
         except Exception as e:
-            print(f"  Skipping {path}: {e}")
+            print(f"  Skipping {img_path}: {e}")
 
-    print(f"Loaded {len(tensors)} RGBD tensors (live depth estimation)")
-    return tensors, names
+    print(f"Processed {len(paths)} RGBD tensors (cached for lazy viewing)")
+    return paths, names
 
 
 # ─── Main ─────────────────────────────────────────────────────────────
@@ -262,12 +270,12 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.data_dir:
-        tensors, names = load_preprocessed(args.data_dir)
+        paths, names = load_preprocessed(args.data_dir)
     else:
-        tensors, names = load_raw(args.raw_dir, args.device)
+        paths, names = load_raw(args.raw_dir, args.device)
 
-    if not tensors:
+    if not paths:
         print("No images to display.")
         sys.exit(1)
 
-    RGBDViewer(tensors, names)
+    RGBDViewer(paths, names)
