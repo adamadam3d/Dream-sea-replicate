@@ -106,50 +106,60 @@ class RGBDViewer:
 
         cmap_name = DEPTH_CMAPS[self.cmap_idx % len(DEPTH_CMAPS)]
 
-        # ── RGB panel ──
-        self.ax_rgb.clear()
-        self.ax_rgb.imshow(rgb)
-        self.ax_rgb.set_title('RGB', fontsize=12, fontweight='bold', color='#e0e0e0', pad=8)
-        self.ax_rgb.axis('off')
-        self.ax_rgb.set_facecolor('#1a1a2e')
-
-        # Stats annotation
+        # Stats annotations
         rgb_stats = (
             f'min={rgb.min():.3f}  max={rgb.max():.3f}\n'
             f'mean={rgb.mean():.3f}  std={rgb.std():.3f}'
         )
-        self.ax_rgb.text(
-            0.02, 0.02, rgb_stats, transform=self.ax_rgb.transAxes,
-            fontsize=7, color='#cccccc', verticalalignment='bottom',
-            bbox=dict(boxstyle='round,pad=0.3', facecolor='#000000', alpha=0.6)
-        )
-
-        # ── Depth panel ──
-        self.ax_depth.clear()
-        self.im_depth = self.ax_depth.imshow(depth, cmap=cmap_name, vmin=0, vmax=1)
-        self.ax_depth.set_title(
-            f'Depth  ({cmap_name})', fontsize=12, fontweight='bold', color='#e0e0e0', pad=8
-        )
-        self.ax_depth.axis('off')
-        self.ax_depth.set_facecolor('#1a1a2e')
-
         depth_stats = (
             f'min={depth.min():.3f}  max={depth.max():.3f}\n'
             f'mean={depth.mean():.3f}  std={depth.std():.3f}'
         )
-        self.ax_depth.text(
-            0.02, 0.02, depth_stats, transform=self.ax_depth.transAxes,
-            fontsize=7, color='#cccccc', verticalalignment='bottom',
-            bbox=dict(boxstyle='round,pad=0.3', facecolor='#000000', alpha=0.6)
-        )
 
-        # ── Colorbar ──
-        if self.cbar is not None:
-            self.cbar.remove()
-        self.cbar = self.fig.colorbar(
-            self.im_depth, ax=self.ax_depth, fraction=0.046, pad=0.04
-        )
-        self.cbar.ax.tick_params(labelsize=7, colors='#aaaaaa')
+        if self.im_rgb is None:
+            # ── Initial setup (first frame only) ──
+            self.im_rgb = self.ax_rgb.imshow(rgb)
+            self.ax_rgb.set_title('RGB', fontsize=12, fontweight='bold', color='#e0e0e0', pad=8)
+            self.ax_rgb.axis('off')
+            self.ax_rgb.set_facecolor('#1a1a2e')
+
+            self.txt_rgb = self.ax_rgb.text(
+                0.02, 0.02, rgb_stats, transform=self.ax_rgb.transAxes,
+                fontsize=7, color='#cccccc', verticalalignment='bottom',
+                bbox=dict(boxstyle='round,pad=0.3', facecolor='#000000', alpha=0.6)
+            )
+
+            # ── Depth panel ──
+            self.im_depth = self.ax_depth.imshow(depth, cmap=cmap_name, vmin=0, vmax=1)
+            self.ax_depth.set_title(
+                f'Depth  ({cmap_name})', fontsize=12, fontweight='bold', color='#e0e0e0', pad=8
+            )
+            self.ax_depth.axis('off')
+            self.ax_depth.set_facecolor('#1a1a2e')
+
+            self.txt_depth = self.ax_depth.text(
+                0.02, 0.02, depth_stats, transform=self.ax_depth.transAxes,
+                fontsize=7, color='#cccccc', verticalalignment='bottom',
+                bbox=dict(boxstyle='round,pad=0.3', facecolor='#000000', alpha=0.6)
+            )
+
+            # ── Colorbar ──
+            self.cbar = self.fig.colorbar(
+                self.im_depth, ax=self.ax_depth, fraction=0.046, pad=0.04
+            )
+            self.cbar.ax.tick_params(labelsize=7, colors='#aaaaaa')
+        else:
+            # ── Fast update of existing artists (prevents colorbar.remove bugs) ──
+            self.im_rgb.set_data(rgb)
+            self.txt_rgb.set_text(rgb_stats)
+
+            self.im_depth.set_data(depth)
+            self.im_depth.set_cmap(cmap_name)
+            self.ax_depth.set_title(
+                f'Depth  ({cmap_name})', fontsize=12, fontweight='bold', color='#e0e0e0', pad=8
+            )
+            self.txt_depth.set_text(depth_stats)
+            self.cbar.draw_all()  # Force update colorbar mapping
 
         # ── Supertitle ──
         h, w = tensor.shape[1], tensor.shape[2]
