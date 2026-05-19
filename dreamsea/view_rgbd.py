@@ -11,7 +11,7 @@ Usage:
     python -m dreamsea.view_rgbd --raw_dir path/to/raw_images --device cuda
 
 Controls:
-    Left/Right arrows or A/D  — Navigate between images
+    Left/Right, A/D, or Scroll — Navigate between images
     Home/End                   — Jump to first/last image
     C                          — Toggle depth colormap (magma/viridis/inferno/plasma)
     S                          — Save current side-by-side figure as PNG
@@ -67,7 +67,7 @@ class RGBDViewer:
         # Footer help text
         self.fig.text(
             0.5, 0.01,
-            '← → Navigate  |  C Colormap  |  S Save  |  Q Quit',
+            '← → or Scroll to Navigate  |  C Colormap  |  S Save  |  Q Quit',
             ha='center', va='bottom', fontsize=9, color='#888888',
             fontstyle='italic'
         )
@@ -77,8 +77,9 @@ class RGBDViewer:
         self.im_depth = None
         self.cbar = None
 
-        # Connect keyboard events
+        # Connect keyboard and mouse events
         self.fig.canvas.mpl_connect('key_press_event', self._on_key)
+        self.fig.canvas.mpl_connect('scroll_event', self._on_scroll)
 
         self._render()
         plt.show()
@@ -181,6 +182,16 @@ class RGBDViewer:
             print(f'Saved: {save_path}')
         elif event.key in ('q', 'escape'):
             plt.close(self.fig)
+
+    def _on_scroll(self, event):
+        if event.button == 'up':
+            # Scroll up -> previous image
+            self.idx = (self.idx - 1) % self.count
+            self._render()
+        elif event.button == 'down':
+            # Scroll down -> next image
+            self.idx = (self.idx + 1) % self.count
+            self._render()
 
 
 # ─── Loading helpers ──────────────────────────────────────────────────
