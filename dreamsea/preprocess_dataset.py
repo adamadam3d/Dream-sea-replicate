@@ -58,15 +58,30 @@ def preprocess_dataset(input_dir: str, output_dir: str, device: str = 'cuda'):
         # Process and save RGBD tensor
         try:
             rgbd_tensor = preprocessor.process_rgb_to_rgbd(path_str)
-            # Squeeze batch dim: [1, 4, H, W] -> [4, H, W]
-            while rgbd_tensor.dim() > 3 and rgbd_tensor.shape[0] == 1:
-                rgbd_tensor = rgbd_tensor.squeeze(0)
-            # Resize to 224x224 now so we don't repeat this every epoch
+            
+            # Explicitly drop batch dimension if present, avoiding greedy squishing
+            if rgbd_tensor.dim() == 4 and rgbd_tensor.shape[0] == 1:
+                rgbd_tensor = rgbd_tensor[0]  # Safe drop of batch dim -> [4, H, W]
+                
+            # Resize appropriately if spatial dimensions don't match 224x224
             if rgbd_tensor.shape[-2:] != (224, 224):
-                rgbd_tensor = F.interpolate(
-                    rgbd_tensor.unsqueeze(0), size=(224, 224),
-                    mode='bilinear', align_corners=False
+                # Separate RGB and Depth channels
+                rgb = rgbd_tensor[:3, :, :].unsqueeze(0)   # [1, 3, H, W]
+                depth = rgbd_tensor[3, :, :].unsqueeze(0).unsqueeze(0) # [1, 1, H, W]
+                
+                # Interpolate RGB with bilinear
+                rgb_resized = F.interpolate(
+                    rgb, size=(224, 224), mode='bilinear', align_corners=False
                 ).squeeze(0)
+                
+                # Interpolate Depth with nearest to preserve sharp edge boundaries
+                depth_resized = F.interpolate(
+                    depth, size=(224, 224), mode='nearest'
+                ).squeeze(0).squeeze(0)
+                
+                # Cat them back together along the channel dimension
+                rgbd_tensor = torch.cat([rgb_resized, depth_resized.unsqueeze(0)], dim=0)
+                
             rgbd_save_path = rgbd_out_dir / f"{base_name}_rgbd.pt"
             # Ensure tensor is saved to CPU to save GPU memory during dataloading later
             torch.save(rgbd_tensor.cpu(), rgbd_save_path)

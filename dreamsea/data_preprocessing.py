@@ -21,11 +21,18 @@ class DataPreprocessor:
         """
         # Load image
         image = Image.open(image_path).convert("RGB")
+        W, H = image.size
         image_np = np.array(image).astype(np.float32) / 255.0
 
         # Estimate depth
         depth_output = self.depth_estimator(image)
         depth_map = depth_output['depth']
+        
+        # CRITICAL FIX: Explicitly convert the PIL depth map to the input image's exact dimensions
+        # using NEAREST neighbor to prevent blurring structural edges.
+        if depth_map.size != (W, H):
+            depth_map = depth_map.resize((W, H), Image.Resampling.NEAREST)
+
         depth_np = np.array(depth_map).astype(np.float32)
 
         # Normalize depth map to [0, 1]
@@ -35,13 +42,6 @@ class DataPreprocessor:
             depth_normalized = (depth_np - depth_min) / (depth_max - depth_min)
         else:
             depth_normalized = np.zeros_like(depth_np)
-
-        # Resize depth map to match image shape if necessary
-        # pipeline output should already match input PIL image, but just in case
-        if depth_normalized.shape != image_np.shape[:2]:
-            depth_pil = Image.fromarray(depth_normalized)
-            depth_pil = depth_pil.resize((image_np.shape[1], image_np.shape[0]), Image.Resampling.BILINEAR)
-            depth_normalized = np.array(depth_pil)
 
         # Expand depth dimension to concatenate
         depth_normalized = np.expand_dims(depth_normalized, axis=-1)
@@ -65,7 +65,8 @@ class DataPreprocessor:
             with torch.no_grad():
                 outputs = self.dino_model(**inputs)
             # Use the CLS token representation as the semantic feature vector
-            cls_token = outputs.last_hidden_state[:, 0, :].squeeze().cpu().numpy()
+            # CRITICAL FIX: Select batch index 0 explicitly instead of using a generic squeeze.
+            cls_token = outputs.last_hidden_state[0, 0, :].cpu().numpy()
             features.append(cls_token)
 
         features_np = np.array(features)
