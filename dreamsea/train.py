@@ -4,6 +4,7 @@ import time
 import traceback
 import urllib.request
 import json
+import math
 from pathlib import Path
 import torch
 import torch.nn.functional as F
@@ -225,6 +226,7 @@ def train_ddpm(data_dir, model_type='conditional', epochs=500, batch_size=16,
             epoch_loss_max = float('-inf')
             valid_steps = 0
             max_grad_norm_epoch = 0.0
+            skipped_steps_epoch = 0
             
             for step, batch in enumerate(dataloader):
                 with accelerator.accumulate(model):
@@ -282,7 +284,10 @@ def train_ddpm(data_dir, model_type='conditional', epochs=500, batch_size=16,
                         grad_norm = accelerator.clip_grad_norm_(model.parameters(), 1.0)
                         if isinstance(grad_norm, torch.Tensor):
                             grad_norm = grad_norm.item()
-                        max_grad_norm_epoch = max(max_grad_norm_epoch, grad_norm)
+                        if math.isfinite(grad_norm):
+                            max_grad_norm_epoch = max(max_grad_norm_epoch, grad_norm)
+                        else:
+                            skipped_steps_epoch += 1
                     optimizer.step()
                     optimizer.zero_grad()
                     
@@ -299,9 +304,13 @@ def train_ddpm(data_dir, model_type='conditional', epochs=500, batch_size=16,
                 epoch_time = time.time() - epoch_start_time
                 
                 # Main log line
+                grad_norm_str = f"{max_grad_norm_epoch:.2f}"
+                if skipped_steps_epoch > 0:
+                    grad_norm_str += f" ({skipped_steps_epoch} steps skipped due to overflow)"
+                
                 print(f"Epoch {epoch + 1}/{epochs} | Avg Loss: {avg_loss:.4f} | "
                       f"Min/Max: {epoch_loss_min:.4f}/{epoch_loss_max:.4f} | "
-                      f"Grad Norm: {max_grad_norm_epoch:.2f} | "
+                      f"Grad Norm: {grad_norm_str} | "
                       f"Steps: {valid_steps}/{len(dataloader)} | "
                       f"Time: {epoch_time:.1f}s")
                 
