@@ -27,9 +27,20 @@ def main():
     parser.add_argument("--cond_model_path", type=str, default=None, help="Path to conditional DDPM checkpoint (.pt file).")
     parser.add_argument("--output_dir", type=str, default="samples", help="Directory to save the generated images.")
     parser.add_argument("--num_samples", type=int, default=1, help="Number of samples to generate.")
+    parser.add_argument("--latent_vector", type=str, default="0.5,-0.5", help="Comma-separated latent vector (e.g. '0.0,0.0').")
+    parser.add_argument("--no_random", action="store_true", help="If set, do not add noise to the latent vector between samples.")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Compute device.")
     parser.add_argument("--num_inference_steps", type=int, default=1000, help="Number of denoising steps (higher = better quality but slower).")
     args = parser.parse_args()
+
+    # Parse latent vector
+    try:
+        latent_base = np.array([float(x) for x in args.latent_vector.split(',')], dtype=np.float32)
+        if latent_base.shape[0] != 2:
+            raise ValueError("Latent vector must have exactly 2 components.")
+    except Exception as e:
+        print(f"Invalid latent vector format: {e}. Using default [0.5, -0.5]")
+        latent_base = np.array([0.5, -0.5], dtype=np.float32)
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -55,11 +66,9 @@ def main():
 
     for i in range(args.num_samples):
         print(f"\n--- Generating Sample Image {i+1}/{args.num_samples} ---")
-        # 1. Create a dummy latent condition (simulating DINOv2 feature)
-        # Different numbers will theoretically produce different "styles" of underwater scenes
-        # We can vary this slightly per sample to see variety
-        latent_condition = np.array([0.5, -0.5], dtype=np.float32)
-        if args.num_samples > 1:
+        # 1. Prepare latent condition
+        latent_condition = latent_base.copy()
+        if args.num_samples > 1 and not args.no_random:
              # Randomize latent slightly to see different variants
              latent_condition += np.random.normal(0, 0.2, size=2).astype(np.float32)
              
