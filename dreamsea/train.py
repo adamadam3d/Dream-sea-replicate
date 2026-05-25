@@ -8,13 +8,16 @@ import math
 from pathlib import Path
 import torch
 import torch.nn.functional as F
+import numpy as np
+from PIL import Image
 from diffusers import DDPMScheduler
 from torch.utils.data import DataLoader, Dataset
 from accelerate import Accelerator
 from dreamsea.models import ConditionalDDPM, UnconditionalDDPM
+from dreamsea.generation_inpainting import GeneratorInpainter
 
 # --- Push notification helper (ntfy.sh) ---
-def send_ntfy(topic, title, message, priority="default", tags=""):
+def send_ntfy(topic, title, message, priority="default", tags="", image_path=None):
     """Send a push notification via ntfy.sh. Fails silently if unavailable."""
     if not topic:
         return
@@ -23,24 +26,118 @@ def send_ntfy(topic, title, message, priority="default", tags=""):
         prio_map = {"min": 1, "low": 2, "default": 3, "high": 4, "urgent": 5}
         prio_int = prio_map.get(priority, 3)
         
-        payload = {
-            "topic": topic,
-            "message": message,
-            "title": title,
-            "priority": prio_int
+        headers = {
+            "Title": title,
+            "Priority": str(prio_int),
+            "Tags": tags
         }
-        if tags:
-            payload["tags"] = [tags]
 
-        data = json.dumps(payload).encode('utf-8')
-        req = urllib.request.Request(
-            "https://ntfy.sh/",
-            data=data,
-            headers={"Content-Type": "application/json"}
-        )
-        urllib.request.urlopen(req, timeout=10)
+        if image_path and os.path.exists(image_path):
+            # ntfy allows sending a file by PUTing the raw bytes
+            with open(image_path, 'rb') as f:
+                data = f.read()
+            # We add a filename header so ntfy knows what it is
+            headers["Filename"] = os.path.basename(image_path)
+            
+            # Since we are sending a file, the message goes in a header
+            headers["Message"] = message
+            
+            req = urllib.request.Request(
+                f"https://ntfy.sh/{topic}",
+                data=data,
+                headers=headers,
+                method='PUT'
+            )
+        else:
+            # Standard JSON payload for text-only
+            payload = {
+                "topic": topic,
+                "message": message,
+                "title": title,
+                "priority": prio_int
+            }
+            if tags:
+                payload["tags"] = [tags]
+
+            data = json.dumps(payload).encode('utf-8')
+            req = urllib.request.Request(
+                "https://ntfy.sh/",
+                data=data,
+                headers={"Content-Type": "application/json"}
+            )
+        
+        urllib.request.urlopen(req, timeout=30)
     except Exception as e:
+        print(f"Failed to send notification: {e}")
         pass  # Never let a notification failure crash training
+
+def generate_samples_during_training(model, epoch, output_dir, device, model_type='conditional', num_samples=10):
+    """Generates a collage of samples using current weights."""
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Initialize a temporary inpainter with current model weights
+    # We don't want to load from disk, we want to use the live 'model'
+    inpainter = GeneratorInpainter(device=device)
+    
+    # Overwrite the inpainter's model with our current training model
+    if model_type == 'conditional':
+        inpainter.cond_model = model
+    else:
+        inpainter.uncond_model = model
+        
+    inpainter.cond_model.eval()
+    inpainter.uncond_model.eval()
+
+    all_rgb = []
+    all_depth = []
+    
+    print(f"  [INFO] Generating {num_samples} samples for visual check...")
+    
+    # Helper to normalize tensor for PIL
+    def to_pil(tensor):
+        t = (tensor.detach().cpu() + 1.0) / 2.0
+        t = torch.clamp(t, 0.0, 1.0)
+        img_np = (t.numpy() * 255).astype(np.uint8)
+        if img_np.ndim == 3: # RGB
+            img_np = np.transpose(img_np, (1, 2, 0))
+            return Image.fromarray(img_np, mode='RGB')
+        else: # Depth
+            return Image.fromarray(img_np, mode='L')
+
+    with torch.no_grad():
+        for i in range(num_samples):
+            # Use a constant [0.0, 0.0] latent vector for all samples to ensure
+            # we are strictly measuring the model's ability to render that specific state
+            latent = np.array([0.0, 0.0], dtype=np.float32)
+            
+            # We use 250 steps for speed during training checks
+            patch = inpainter.generate_patch(latent, num_inference_steps=250)
+            patch_tensor = torch.from_numpy(patch[0])
+            
+            all_rgb.append(to_pil(patch_tensor[:3]))
+            all_depth.append(to_pil(patch_tensor[3]))
+
+    # Create Collage
+    cols = 5
+    rows = (num_samples + cols - 1) // cols
+    w, h = all_rgb[0].size
+    
+    collage_rgb = Image.new('RGB', (cols * w, rows * h))
+    collage_depth = Image.new('L', (cols * w, rows * h))
+    
+    for idx, (rgb, depth) in enumerate(zip(all_rgb, all_depth)):
+        r, c = idx // cols, idx % cols
+        collage_rgb.paste(rgb, (c * w, r * h))
+        collage_depth.paste(depth, (c * w, r * h))
+        
+    rgb_path = output_dir / f"collage_epoch_{epoch}_rgb.png"
+    depth_path = output_dir / f"collage_epoch_{epoch}_depth.png"
+    
+    collage_rgb.save(rgb_path)
+    collage_depth.save(depth_path)
+    
+    return str(rgb_path), str(depth_path)
 
 class PreprocessedDataset(Dataset):
     """Loads preprocessed RGBD tensors and condition vectors from disk."""
@@ -341,9 +438,23 @@ def train_ddpm(data_dir, model_type='conditional', epochs=500, batch_size=16,
                         'optimizer_state_dict': optimizer.state_dict(),
                     }, checkpoint_path)
                     print(f"--> Saved checkpoint: {checkpoint_path}")
-                    send_ntfy(ntfy_topic, f"💾 {model_type} checkpoint",
-                              f"Epoch {epoch+1}/{epochs} | loss: {avg_loss:.4f}",
-                              tags="floppy_disk")
+
+                    # Generate and send samples
+                    try:
+                        sample_dir = os.path.join(checkpoint_dir, "samples_during_training")
+                        rgb_collage, depth_collage = generate_samples_during_training(
+                            unwrapped_model, epoch + 1, sample_dir, accelerator.device, model_type
+                        )
+                        
+                        send_ntfy(ntfy_topic, f"🖼️ {model_type} Samples (RGB)", 
+                                 f"Epoch {epoch+1} visual check", tags="art", image_path=rgb_collage)
+                        send_ntfy(ntfy_topic, f"📐 {model_type} Samples (Depth)", 
+                                 f"Epoch {epoch+1} depth check", tags="triangular_ruler", image_path=depth_collage)
+                    except Exception as e:
+                        print(f"  [WARN] Failed to generate/send samples: {e}")
+                        send_ntfy(ntfy_topic, f"💾 {model_type} checkpoint",
+                                  f"Epoch {epoch+1}/{epochs} | loss: {avg_loss:.4f}",
+                                  tags="floppy_disk")
 
     except KeyboardInterrupt:
         accelerator.print("\n[INFO] Training interrupted by user. Saving current state...")
