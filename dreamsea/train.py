@@ -26,26 +26,28 @@ def send_ntfy(topic, title, message, priority="default", tags="", image_path=Non
         prio_map = {"min": 1, "low": 2, "default": 3, "high": 4, "urgent": 5}
         prio_int = prio_map.get(priority, 3)
         
-        headers = {
-            "Title": title,
-            "Priority": str(prio_int),
-            "Tags": tags
-        }
-
         if image_path and os.path.exists(image_path):
+            import urllib.parse
             # ntfy allows sending a file by PUTing the raw bytes
             with open(image_path, 'rb') as f:
                 data = f.read()
-            # We add a filename header so ntfy knows what it is
-            headers["Filename"] = os.path.basename(image_path)
             
-            # Since we are sending a file, the message goes in a header
-            headers["Message"] = message
+            # Use query parameters to avoid urllib header encoding crashes with emojis
+            params = {
+                "title": title,
+                "message": message,
+                "priority": str(prio_int),
+                "filename": os.path.basename(image_path)
+            }
+            if tags:
+                params["tags"] = tags
+                
+            query_string = urllib.parse.urlencode(params)
+            url = f"https://ntfy.sh/{topic}?{query_string}"
             
             req = urllib.request.Request(
-                f"https://ntfy.sh/{topic}",
+                url,
                 data=data,
-                headers=headers,
                 method='PUT'
             )
         else:
