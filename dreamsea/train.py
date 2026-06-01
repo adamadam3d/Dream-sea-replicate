@@ -82,20 +82,19 @@ def generate_samples_during_training(model, epoch, output_dir, device, model_typ
     # We don't want to load from disk, we want to use the live 'model'
     inpainter = GeneratorInpainter(device=device)
     
-    # Overwrite the inpainter's model with our current training model
+    # Overwrite the inpainter's model with the live training model
     if model_type == 'conditional':
         inpainter.cond_model = model
+        inpainter.cond_model.eval()
     else:
         inpainter.uncond_model = model
-        
-    inpainter.cond_model.eval()
-    inpainter.uncond_model.eval()
+        inpainter.uncond_model.eval()
 
     all_rgb = []
     all_depth = []
-    
+
     print(f"  [INFO] Generating {num_samples} samples for visual check...")
-    
+
     # Helper to normalize tensor for PIL
     def to_pil(tensor):
         t = (tensor.detach().cpu() + 1.0) / 2.0
@@ -109,13 +108,19 @@ def generate_samples_during_training(model, epoch, output_dir, device, model_typ
 
     with torch.no_grad():
         for i in range(num_samples):
-            # Use a constant [0.0, 0.0] latent vector for all samples to ensure
-            # we are strictly measuring the model's ability to render that specific state
-            latent = np.array([0.0, 0.0], dtype=np.float32)
-            
-            # We use 250 steps for speed during training checks
-            patch = inpainter.generate_patch(latent, num_inference_steps=250)
-            patch_tensor = torch.from_numpy(patch[0])
+            if model_type == 'conditional':
+                # Constant [0.0, 0.0] latent to probe the model at the PCA-space origin
+                latent = np.array([0.0, 0.0], dtype=np.float32)
+                patch = inpainter.generate_patch(latent, num_inference_steps=250)
+                patch_tensor = torch.from_numpy(patch[0])
+            else:
+                # Run denoising directly with the trained unconditional model
+                image = torch.randn(1, 4, 224, 224, device=device)
+                inpainter.scheduler.set_timesteps(num_inference_steps=250)
+                for t in inpainter.scheduler.timesteps:
+                    noise_pred = inpainter.uncond_model(image, t)
+                    image = inpainter.scheduler.step(noise_pred, t, image).prev_sample
+                patch_tensor = image[0].cpu()
             
             all_rgb.append(to_pil(patch_tensor[:3]))
             all_depth.append(to_pil(patch_tensor[3]))

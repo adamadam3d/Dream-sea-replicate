@@ -1,5 +1,20 @@
 import numpy as np
 
+
+def scale_latent_grid(grid, latent_min, latent_max):
+    """
+    Rescales a fractal grid (sampled from ~N(0,1)) into the observed PCA
+    coordinate range of the training data.  Pass latent_min / latent_max from
+    the latent_stats.json saved by preprocess_dataset.py.
+    """
+    latent_min = np.array(latent_min, dtype=np.float32)
+    latent_max = np.array(latent_max, dtype=np.float32)
+    grid_min = grid.min(axis=(0, 1), keepdims=True)
+    grid_max = grid.max(axis=(0, 1), keepdims=True)
+    normalized = (grid - grid_min) / np.maximum(grid_max - grid_min, 1e-8)
+    return normalized * (latent_max - latent_min) + latent_min
+
+
 def diamond_square_2d(size, roughness=0.5, seed=None):
     """
     Generates a 2D grid of latent embeddings using the Diamond-Square algorithm.

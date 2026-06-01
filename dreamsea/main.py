@@ -50,12 +50,8 @@ def main():
 
         # Step 5: SDS Optimization
         print("\n--- 5. SDS Optimization (Dummy 5 iterations) ---")
-        uncond_model = UnconditionalDDPM(in_channels=3, out_channels=3).to(device) # using 3-channels for image rendering
+        uncond_model = UnconditionalDDPM(in_channels=4, out_channels=4).to(device)
         scheduler = DDPMScheduler(num_train_timesteps=1000)
-
-        # We need to map model output so that it generates a 3-channel image for SDS
-        # For prototype testing, SDS is optimizing a 3 channel rendered image, so the diffusion model
-        # computing SDS needs to accept 3 channels.
 
         gs_opt.optimize_3dgs_sds(gs_model, uncond_model, scheduler, iterations=5)
 

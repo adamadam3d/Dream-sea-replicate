@@ -22,29 +22,31 @@ def export_to_ply(checkpoint_path, output_path):
 
     xyz = xyz.numpy()
     normals = np.zeros_like(xyz)
-    
-    # Appearance params
-    f_dc = state_dict['features_dc'].detach().cpu().numpy()
-    opacity = state_dict['opacity'].detach().cpu().numpy()
-    scale = state_dict['scaling'].detach().cpu().numpy()
-    rotation = state_dict['rotation'].detach().cpu().numpy()
-    
+
+    # Appearance params (loaded to CPU, no grad — .detach() is a no-op but left for clarity)
+    f_dc = state_dict['features_dc'].numpy()
+    opacity = state_dict['opacity'].numpy()
+    scale = state_dict['scaling'].numpy()
+    rotation = state_dict['rotation'].numpy()
+
     # ------------------------------------------------------------------
     # Standard 3DGS Viewer Conversions
-    # 1. Colors: Viewers expect Spherical Harmonics DC terms. 
-    #    Formula: Color = SH_C0 * f_dc + 0.5
-    #    Since our f_dc is currently raw RGB [0, 1], we must invert this:
+    # 1. Colors: features_dc are raw pre-tanh parameters (GaussianSplattingModel.forward
+    #    applies tanh at render time).  Recover actual colors, remap to [0, 1], then
+    #    invert the SH DC formula Color = SH_C0 * sh + 0.5 to get the SH coefficient.
     SH_C0 = 0.28209479177387814
-    f_dc = (f_dc - 0.5) / SH_C0
-    
-    # 2. Scale: Viewers apply exp(scale) to the saved values.
-    #    Since our scaling was raw (e.g., 0.01), we need to save log(scale).
+    f_dc = np.tanh(f_dc)             # raw param → actual color in [-1, 1]
+    f_dc = (f_dc + 1.0) / 2.0       # [-1, 1] → [0, 1]
+    f_dc = (f_dc - 0.5) / SH_C0     # [0, 1] → SH DC coefficient
+
+    # 2. Scale: Viewers apply exp(stored) to get actual scale.
+    #    Our scaling parameter is in raw (unactivated) space — save log so exp recovers it.
     scale = np.log(np.clip(scale, 1e-10, None))
-    
-    # 3. Opacity: Viewers apply sigmoid(opacity).
-    #    Since our opacity was raw (e.g., 0.1), we need to save inverse_sigmoid(opacity).
-    opacity = np.clip(opacity, 1e-5, 1 - 1e-5)
-    opacity = np.log(opacity / (1.0 - opacity))
+
+    # 3. Opacity: The raw parameter is already the pre-sigmoid value.
+    #    PLY viewers apply sigmoid(stored) to get actual opacity, so save the raw
+    #    parameter directly.  Do NOT apply logit — that would double-transform.
+    # (no transformation needed)
     # ------------------------------------------------------------------
 
     # Construct the attribute list for 3DGS .ply

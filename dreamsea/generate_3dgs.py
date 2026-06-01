@@ -1,22 +1,23 @@
 import os
+import json
 import argparse
 import torch
 import numpy as np
-from diffusers import DDPMScheduler
 from pathlib import Path
 
-from dreamsea.fractal_latent import diamond_square_2d
+from dreamsea.fractal_latent import diamond_square_2d, scale_latent_grid
 from dreamsea.generation_inpainting import GeneratorInpainter
-from dreamsea.models import UnconditionalDDPM
 import dreamsea.gs_sds_optimization as gs_opt
 
-def generate_3dgs(cond_ckpt, uncond_ckpt, grid_size=3, roughness=0.5, 
-                  output_dir="outputs", sds_iterations=500, device='cuda' if torch.cuda.is_available() else 'cpu'):
+def generate_3dgs(cond_ckpt, uncond_ckpt, grid_size=3, roughness=0.5,
+                  output_dir="outputs", sds_iterations=500,
+                  latent_stats_path=None,
+                  device='cuda' if torch.cuda.is_available() else 'cpu'):
     """
     Full pipeline to generate a 3DGS scene from trained checkpoints.
     """
     os.makedirs(output_dir, exist_ok=True)
-    
+
     # 1. Initialize Generator with both checkpoints
     print(f"\n--- 1. Initializing Generator ---")
     print(f"Loading Conditional Checkpoint: {cond_ckpt}")
@@ -30,6 +31,18 @@ def generate_3dgs(cond_ckpt, uncond_ckpt, grid_size=3, roughness=0.5,
     # 2. Generate Fractal Latent Grid
     print(f"\n--- 2. Generating Fractal Latent Grid (size: {grid_size}x{grid_size}) ---")
     latent_grid = diamond_square_2d(grid_size, roughness=roughness)
+
+    # Rescale the grid into the PCA coordinate range seen during training so
+    # the conditional model receives in-distribution latent vectors.
+    if latent_stats_path and os.path.exists(latent_stats_path):
+        with open(latent_stats_path) as f:
+            latent_stats = json.load(f)
+        latent_grid = scale_latent_grid(latent_grid, latent_stats["min"], latent_stats["max"])
+        print(f"Latent grid rescaled to training PCA range using: {latent_stats_path}")
+    else:
+        print("WARNING: No latent_stats_path provided. Fractal grid is NOT calibrated to "
+              "training PCA range — generation quality may be reduced.")
+
     print(f"Latent grid generated.")
 
     # 3. Generate and Stitch RGBD Patches
@@ -57,14 +70,11 @@ def generate_3dgs(cond_ckpt, uncond_ckpt, grid_size=3, roughness=0.5,
 
     # 5. SDS Optimization
     print(f"\n--- 5. Optimizing 3DGS via SDS ({sds_iterations} iterations) ---")
-    # Note: SDS uses the Unconditional model as a prior to refine the appearance
-    scheduler = DDPMScheduler(num_train_timesteps=1000)
-    
-    # We use the unconditional model loaded in the generator for SDS
+    # Reuse the scheduler that was already created inside the generator
     gs_opt.optimize_3dgs_sds(
-        model=gs_model, 
-        diffusion_model=generator.uncond_model, 
-        scheduler=scheduler, 
+        model=gs_model,
+        diffusion_model=generator.uncond_model,
+        scheduler=generator.scheduler,
         iterations=sds_iterations
     )
 
@@ -86,6 +96,9 @@ if __name__ == "__main__":
     parser.add_argument("--roughness", type=float, default=0.5, help="Fractal roughness.")
     parser.add_argument("--sds_iterations", type=int, default=100, help="Number of SDS optimization steps.")
     parser.add_argument("--output_dir", type=str, default="outputs/3dgs_gen", help="Directory to save output files.")
+    parser.add_argument("--latent_stats_path", type=str, default=None,
+                        help="Path to latent_stats.json from preprocessing. Rescales fractal "
+                             "grid into the training PCA range for in-distribution generation.")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Compute device.")
 
     args = parser.parse_args()
@@ -97,5 +110,6 @@ if __name__ == "__main__":
         roughness=args.roughness,
         sds_iterations=args.sds_iterations,
         output_dir=args.output_dir,
+        latent_stats_path=args.latent_stats_path,
         device=args.device
     )

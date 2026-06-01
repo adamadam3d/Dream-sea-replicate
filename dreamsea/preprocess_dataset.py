@@ -1,8 +1,10 @@
 import os
 import glob
+import json
 import torch
 import torch.nn.functional as F
 import joblib
+import numpy as np
 from pathlib import Path
 from dreamsea.data_preprocessing import DataPreprocessor
 
@@ -44,6 +46,20 @@ def preprocess_dataset(input_dir: str, output_dir: str, device: str = 'cuda'):
     pca_save_path = output_path / "pca_model.pkl"
     joblib.dump(preprocessor.pca, pca_save_path)
     print(f"Saved fitted PCA model to: {pca_save_path}")
+
+    # Save the min/max of PCA-transformed values so fractal latent grids at
+    # inference time can be rescaled into the training distribution.
+    all_features_np = np.array([v.cpu().numpy() for v in features_dict.values()])
+    latent_stats = {
+        "min": all_features_np.min(axis=0).tolist(),
+        "max": all_features_np.max(axis=0).tolist(),
+        "mean": all_features_np.mean(axis=0).tolist(),
+        "std": all_features_np.std(axis=0).tolist(),
+    }
+    stats_save_path = output_path / "latent_stats.json"
+    with open(stats_save_path, 'w') as f:
+        json.dump(latent_stats, f, indent=2)
+    print(f"Saved latent statistics to: {stats_save_path}")
 
     # 2. Process RGB to RGBD and save everything
     print("Processing RGBD and saving tensors...")

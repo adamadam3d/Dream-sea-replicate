@@ -23,15 +23,46 @@ class GaussianSplattingModel(nn.Module):
         # Radiance/Colors (Spherical Harmonics, but for simplicity we use RGB features here)
         self.features_dc = nn.Parameter(torch.tensor(point_cloud_colors, dtype=torch.float32).to(self.device))
 
-    def forward(self, camera):
+    def forward(self, camera=None, canvas_size=224):
         """
-        Dummy forward pass representing a 3DGS rasterization.
-        In a full implementation, this calls the CUDA rasterizer.
-        Returns a rendered RGBD image.
+        Differentiable top-down orthographic projection onto a (1, 4, H, W) RGBD canvas.
+        Gradients flow through features_dc and opacity so SDS can optimize appearance.
+        (In a full implementation this would call the CUDA Gaussian rasterizer.)
         """
-        # Placeholder for rendering
-        # Returning RGBD image matching camera res (4 channels)
-        return torch.randn(1, 4, 224, 224).to(self.device)
+        opacities = torch.sigmoid(self.opacity)   # (N, 1)
+        colors = torch.tanh(self.features_dc)     # (N, 3), bounded [-1, 1]
+
+        x_pos = self.positions[:, 0]
+        y_pos = self.positions[:, 1]
+        z_pos = self.positions[:, 2]
+
+        x_norm = (x_pos - x_pos.min()) / (x_pos.max() - x_pos.min() + 1e-8)
+        y_norm = (y_pos - y_pos.min()) / (y_pos.max() - y_pos.min() + 1e-8)
+
+        px = (x_norm * (canvas_size - 1)).long().clamp(0, canvas_size - 1)
+        py = (y_norm * (canvas_size - 1)).long().clamp(0, canvas_size - 1)
+        flat_idx = py * canvas_size + px  # (N,)
+
+        # Depth channel: normalize z to [-1, 1]
+        z_norm = (z_pos - z_pos.min()) / (z_pos.max() - z_pos.min() + 1e-8) * 2.0 - 1.0
+
+        # Opacity-weighted RGBD values — this is the differentiable part
+        rgba = torch.cat([colors, z_norm.unsqueeze(1)], dim=1)  # (N, 4)
+        weighted = rgba * opacities                              # (N, 4)
+
+        # Scatter onto canvas with index_put (accumulate=True supports autograd)
+        flat_size = canvas_size * canvas_size
+        channels = []
+        for c in range(4):
+            ch = torch.zeros(flat_size, device=self.device)
+            ch = ch.index_put((flat_idx,), weighted[:, c], accumulate=True)
+            channels.append(ch)
+
+        den = torch.zeros(flat_size, device=self.device)
+        den = den.index_put((flat_idx,), opacities[:, 0], accumulate=True)
+
+        rendered = torch.stack(channels, dim=0) / (den.unsqueeze(0) + 1e-8)
+        return rendered.view(4, canvas_size, canvas_size).unsqueeze(0)  # (1, 4, H, W)
 
 def create_point_cloud_from_rgbd(rgbd_map, fov=60.0):
     """
@@ -72,13 +103,9 @@ def create_point_cloud_from_rgbd(rgbd_map, fov=60.0):
 
 def compute_sds_loss(diffusion_model, scheduler, rendered_image, text_embeddings=None):
     """
-    Computes Score Distillation Sampling (SDS) loss using a 2D diffusion prior.
-    rendered_image: (1, 4, H, W) - RGBD
+    Score Distillation Sampling loss (DreamFusion).
+    rendered_image: (1, 4, H, W) — must be a differentiable function of the 3DGS parameters.
     """
-    # In SDS, we do not backprop through the diffusion model.
-    # We add noise, predict noise, and compute gradient for the input image.
-
-    # 1. Add noise
     t = torch.randint(
         int(scheduler.config.num_train_timesteps * 0.02),
         int(scheduler.config.num_train_timesteps * 0.98),
@@ -86,39 +113,22 @@ def compute_sds_loss(diffusion_model, scheduler, rendered_image, text_embeddings
     ).long()
 
     noise = torch.randn_like(rendered_image)
-    noisy_image = scheduler.add_noise(rendered_image, noise, t)
+    # Detach before add_noise: the SDS gradient flows through rendered_image
+    # directly (see loss below), not through the forward diffusion path.
+    noisy_image = scheduler.add_noise(rendered_image.detach(), noise, t)
 
-    # 2. Predict noise
     with torch.no_grad():
-        # Here we assume a standard DDPM.
-        # If conditioned on text/embeddings, pass encoder_hidden_states.
         if text_embeddings is not None:
             noise_pred = diffusion_model(noisy_image, t, encoder_hidden_states=text_embeddings)
         else:
             noise_pred = diffusion_model(noisy_image, t)
 
-    # 3. SDS gradient weighting
-    # grad = w(t) * (noise_pred - noise)
-    # where w(t) is a weighting function, often simplified to 1 or alpha_t
     w = 1.0 - scheduler.alphas_cumprod.to(t.device)[t]
-
     grad = w * (noise_pred - noise)
 
-    # 4. SDS loss is a dummy loss that evaluates to gradient
-    # We want to optimize the parameters that produced `rendered_image`.
-    # rendered_image comes from gs_model(camera_pose), which in a real implementation
-    # uses scaling, rotation, opacity, features_dc.
-    # In our dummy rasterizer, the image is randomly generated independent of params,
-    # which breaks autograd. To fix this dummy implementation, we multiply it by the sum of parameters.
-
-    # Normally it's just: loss = torch.sum(grad.detach() * rendered_image)
-    # But for dummy testing we force a gradient connection if rendered_image has no grad_fn
-    if not rendered_image.requires_grad:
-        loss = torch.sum(grad.detach() * rendered_image)
-        loss.requires_grad_(True)
-    else:
-        loss = torch.sum(grad.detach() * rendered_image)
-
+    # Stop-gradient on the diffusion score; differentiate only through rendered_image.
+    # Gradients flow back through the differentiable rasterizer to features_dc and opacity.
+    loss = torch.sum(grad.detach() * rendered_image)
     return loss
 
 
