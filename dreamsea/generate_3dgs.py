@@ -56,6 +56,17 @@ def generate_3dgs(cond_ckpt, uncond_ckpt, grid_size=3, roughness=0.5,
     torch.save(torch.from_numpy(global_map), map_path)
     print(f"Global RGBD Map saved to: {map_path}")
 
+    # Save the global RGB map as a PNG image
+    from PIL import Image
+    rgb_map_path = os.path.join(output_dir, "global_rgb_map.png")
+    rgb_map = global_map[:3, :, :] # Extract RGB channels
+    rgb_img_np = (rgb_map + 1.0) / 2.0 # Normalize from [-1, 1] to [0, 1]
+    rgb_img_np = np.clip(rgb_img_np, 0.0, 1.0)
+    rgb_img_np = (rgb_img_np * 255.0).astype(np.uint8) # Convert to uint8
+    rgb_img_np = np.transpose(rgb_img_np, (1, 2, 0)) # CHW -> HWC for PIL
+    Image.fromarray(rgb_img_np).save(rgb_map_path)
+    print(f"Global RGB Map image saved to: {rgb_map_path}")
+
     # 4. Initialize 3D Gaussian Splatting
     print("\n--- 4. Initializing 3D Gaussian Splatting ---")
     positions, colors = gs_opt.create_point_cloud_from_rgbd(global_map)
