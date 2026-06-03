@@ -18,16 +18,22 @@ def scale_latent_grid(grid, latent_min, latent_max):
 def diamond_square_2d(size, roughness=0.5, seed=None):
     """
     Generates a 2D grid of latent embeddings using the Diamond-Square algorithm.
-    Size must be 2^n + 1. Returns a grid of shape (size, size, 2) since we want
+    Size must be 2^n + 1 (or 1 for a single patch). Returns a grid of shape (size, size, 2) since we want
     to generate 2D PCA latent vectors.
     """
     if seed is not None:
         np.random.seed(seed)
 
+    if size == 1:
+        # Handle the base case of a 1x1 grid (single patch)
+        grid = np.zeros((1, 1, 2), dtype=np.float32)
+        grid[0, 0] = np.random.randn(2)
+        return grid
+
     if size < 3:
-        raise ValueError("Size must be at least 3 (2^1 + 1)")
+        raise ValueError("Size must be at least 3 (2^1 + 1), or 1")
     if (size - 1) & (size - 2) != 0:
-        raise ValueError("Size must be 2^n + 1")
+        raise ValueError("Size must be 2^n + 1 (e.g., 3, 5, 9, 17...) or 1")
 
     grid = np.zeros((size, size, 2), dtype=np.float32)
 

@@ -115,7 +115,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate a 3DGS scene from trained DreamSea checkpoints.")
     parser.add_argument("--cond_ckpt", type=str, required=True, help="Path to the conditional DDPM checkpoint.")
     parser.add_argument("--uncond_ckpt", type=str, required=True, help="Path to the unconditional DDPM checkpoint.")
-    parser.add_argument("--grid_size", type=int, default=3, help="Latent grid size (must be 2^n + 1, e.g., 3, 5, 9).")
+    parser.add_argument("--grid_size", type=int, default=3, help="Latent grid size (must be 2^n + 1, e.g., 3, 5, 9, or 1 for a single patch).")
     parser.add_argument("--roughness", type=float, default=0.5, help="Fractal roughness.")
     parser.add_argument("--sds_iterations", type=int, default=100, help="Number of SDS optimization steps.")
     parser.add_argument("--output_dir", type=str, default="outputs/3dgs_gen", help="Directory to save output files.")
