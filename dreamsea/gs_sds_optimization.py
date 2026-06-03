@@ -13,15 +13,24 @@ class GaussianSplattingModel(nn.Module):
 
         # Optimize appearance only (covariance, opacity, radiance)
         # Covariance represented via scaling and rotation (quaternions)
-        self.scaling = nn.Parameter(torch.ones((N, 3), dtype=torch.float32).to(self.device) * 0.01)
+        # Scale proportionally to depth to ensure Gaussians overlap to form a solid surface
+        z_vals = self.positions[:, 2:3].detach()
+        base_scale = z_vals / 200.0
+        self.scaling = nn.Parameter(base_scale.repeat(1, 3))
+        
         self.rotation = nn.Parameter(torch.zeros((N, 4), dtype=torch.float32).to(self.device))
         self.rotation.data[:, 0] = 1.0 # Initialize real part of quaternion to 1
 
         # Opacity
-        self.opacity = nn.Parameter(torch.ones((N, 1), dtype=torch.float32).to(self.device) * 0.1)
+        # Initialize to 5.0 so that sigmoid(5.0) = 0.993 (fully opaque for solid reconstruction)
+        self.opacity = nn.Parameter(torch.ones((N, 1), dtype=torch.float32).to(self.device) * 5.0)
 
         # Radiance/Colors (Spherical Harmonics, but for simplicity we use RGB features here)
-        self.features_dc = nn.Parameter(torch.tensor(point_cloud_colors, dtype=torch.float32).to(self.device))
+        # Inverse transform colors to pre-tanh space so the initial render matches the input image
+        target_colors = point_cloud_colors * 2.0 - 1.0
+        target_colors = np.clip(target_colors, -0.999, 0.999)
+        init_features_dc = np.arctanh(target_colors)
+        self.features_dc = nn.Parameter(torch.tensor(init_features_dc, dtype=torch.float32).to(self.device))
 
     def forward(self, camera=None, canvas_size=224):
         """
