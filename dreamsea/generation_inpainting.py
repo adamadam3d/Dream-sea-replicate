@@ -81,18 +81,19 @@ class GeneratorInpainter:
         return patch_grid
 
     @torch.no_grad()
-    def repaint_inpaint(self, image_input, mask, num_inference_steps=1000, jump_length=10, jump_n_sample=10):
+    def repaint_inpaint(self, image_input, mask, num_inference_steps=1000, jump_length=10, jump_n_sample=10, latent_condition=None):
         """
-        RePaint inpainting (Lugmayr et al. 2022) using the unconditional DDPM.
+        RePaint inpainting (Lugmayr et al. 2022) using either the conditional or unconditional DDPM.
 
         image_input: known image regions (1, 4, H, W) — unknown pixels can hold any value.
         mask:        1=known, 0=unknown (1, 1, H, W).
         jump_length: how many steps to jump back for time-travel resampling.
         jump_n_sample: how many extra resamplings per jump (1 = no time-travel).
+        latent_condition: (Optional) If provided, uses conditional model for inpainting.
 
         At each denoising step t→t-1:
           - Known pixels are re-noised to level t-1 from the clean reference.
-          - Unknown pixels are predicted by the unconditional DDPM.
+          - Unknown pixels are predicted by the DDPM.
           - Periodically the trajectory jumps back jump_length steps and is
             resampled jump_n_sample times so boundaries harmonise.
         """
@@ -100,6 +101,14 @@ class GeneratorInpainter:
             image_input = torch.from_numpy(image_input).to(self.device)
         if not isinstance(mask, torch.Tensor):
             mask = torch.from_numpy(mask).to(self.device)
+
+        cond_tensor = None
+        if latent_condition is not None:
+            if not isinstance(latent_condition, torch.Tensor):
+                cond_tensor = torch.from_numpy(latent_condition).float().to(self.device)
+            else:
+                cond_tensor = latent_condition.float().to(self.device)
+            cond_tensor = cond_tensor.view(1, 1, -1)
 
         self.scheduler.set_timesteps(num_inference_steps=num_inference_steps)
         timesteps = list(self.scheduler.timesteps)  # descending: T, T-1, ..., 0
@@ -124,7 +133,11 @@ class GeneratorInpainter:
             )
 
             # Unknown region: standard DDPM denoising step
-            noise_pred = self.uncond_model(x_t, t)
+            if cond_tensor is not None:
+                noise_pred = self.cond_model(x_t, t, encoder_hidden_states=cond_tensor)
+            else:
+                noise_pred = self.uncond_model(x_t, t)
+            
             x_unknown = self.scheduler.step(noise_pred, t, x_t).prev_sample
 
             x_t = mask * x_known + (1 - mask) * x_unknown
@@ -153,7 +166,11 @@ class GeneratorInpainter:
                             image_input, noise_k,
                             torch.tensor([t_j_prev], device=self.device)
                         )
-                        np_j = self.uncond_model(x_t, t_j)
+                        if cond_tensor is not None:
+                            np_j = self.cond_model(x_t, t_j, encoder_hidden_states=cond_tensor)
+                        else:
+                            np_j = self.uncond_model(x_t, t_j)
+                        
                         x_unknown_j = self.scheduler.step(np_j, t_j, x_t).prev_sample
                         x_t = mask * x_known_j + (1 - mask) * x_unknown_j
 
@@ -161,7 +178,7 @@ class GeneratorInpainter:
 
         return x_t.cpu().numpy()
 
-    def stitch_and_inpaint(self, patch_grid, overlap_size=32):
+    def stitch_and_inpaint(self, patch_grid, overlap_size=32, latent_grid=None, use_conditional=False):
         """
         Takes the generated patches and stitches them into a dense RGBD map.
         Uses a parallelizable inpainting pattern with RePaint to handle seams/overlaps
@@ -196,7 +213,7 @@ class GeneratorInpainter:
         # All tiles are then inpainted from a frozen snapshot of the canvas so no
         # seam patch depends on another — matching the parallelizable inpainting
         # pattern described in the paper.
-        print("Inpainting seams using parallelizable RePaint...")
+        print(f"Inpainting seams using parallelizable RePaint (Conditional: {use_conditional})...")
         seam_regions = []
 
         for y in range(1, N):
@@ -207,7 +224,10 @@ class GeneratorInpainter:
                 x_s = x * (patch_size - overlap_size)
                 x_e = x_s + patch_size
                 if y_s >= 0 and y_e <= canvas_size and x_s >= 0 and x_e <= canvas_size:
-                    seam_regions.append((y_s, y_e, x_s, x_e))
+                    cond = None
+                    if use_conditional and latent_grid is not None:
+                        cond = (latent_grid[y - 1, x] + latent_grid[y, x]) / 2.0
+                    seam_regions.append((y_s, y_e, x_s, x_e, cond))
 
         for x in range(1, N):
             x_seam_center = x * (patch_size - overlap_size) + overlap_size // 2
@@ -217,7 +237,10 @@ class GeneratorInpainter:
                 y_s = y * (patch_size - overlap_size)
                 y_e = y_s + patch_size
                 if y_s >= 0 and y_e <= canvas_size and x_s >= 0 and x_e <= canvas_size:
-                    seam_regions.append((y_s, y_e, x_s, x_e))
+                    cond = None
+                    if use_conditional and latent_grid is not None:
+                        cond = (latent_grid[y, x - 1] + latent_grid[y, x]) / 2.0
+                    seam_regions.append((y_s, y_e, x_s, x_e, cond))
 
         # Freeze the canvas state so every seam tile reads from the same unmodified
         # blended image — writes go to canvas only after all reads are determined.
@@ -225,12 +248,12 @@ class GeneratorInpainter:
         mask_snapshot = mask.copy()
 
         seam_count = len(seam_regions)
-        for idx, (y_s, y_e, x_s, x_e) in enumerate(seam_regions):
+        for idx, (y_s, y_e, x_s, x_e, cond) in enumerate(seam_regions):
             print(f"  Inpainting seam {idx + 1}/{seam_count}...")
             local_canvas = np.expand_dims(canvas_snapshot[:, y_s:y_e, x_s:x_e], 0)
             local_mask = np.expand_dims(mask_snapshot[:, y_s:y_e, x_s:x_e], 0)
 
-            inpainted = self.repaint_inpaint(local_canvas, local_mask)
+            inpainted = self.repaint_inpaint(local_canvas, local_mask, latent_condition=cond)
 
             canvas[:, y_s:y_e, x_s:x_e] = (
                 local_mask[0] * local_canvas[0] + (1 - local_mask[0]) * inpainted[0]
