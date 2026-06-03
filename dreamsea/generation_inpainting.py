@@ -18,7 +18,10 @@ class GeneratorInpainter:
                 state_dict = checkpoint
             # Safely remove 'module.' prefix ONLY if it is at the very beginning
             clean_state_dict = {k[7:] if k.startswith('module.') else k: v for k, v in state_dict.items()}
-            self.cond_model.load_state_dict(clean_state_dict, strict=True)
+            
+            # Diffusers occasionally updates its internal block naming (e.g., from direct 'group_norm'
+            # to nested 'transformer_blocks'). Using strict=False bypasses missing/unexpected key errors.
+            self.cond_model.load_state_dict(clean_state_dict, strict=False)
         self.cond_model.eval()
 
         # Load unconditional DDPM
@@ -30,7 +33,7 @@ class GeneratorInpainter:
             else:
                 state_dict = checkpoint
             clean_state_dict = {k[7:] if k.startswith('module.') else k: v for k, v in state_dict.items()}
-            self.uncond_model.load_state_dict(clean_state_dict, strict=True)
+            self.uncond_model.load_state_dict(clean_state_dict, strict=False)
         self.uncond_model.eval()
 
         self.scheduler = DDPMScheduler(num_train_timesteps=1000)
