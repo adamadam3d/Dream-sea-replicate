@@ -107,7 +107,11 @@ class GeneratorInpainter:
         x_t = torch.randn_like(image_input)
 
         i = 0
-        while i < len(timesteps):
+        total_steps = len(timesteps)
+        while i < total_steps:
+            if i % 10 == 0:
+                print(f"RePaint step {i}/{total_steps}...")
+            
             t = timesteps[i]
 
             # Known region: add noise at the *next* (lower) noise level so known
@@ -130,6 +134,8 @@ class GeneratorInpainter:
             if jump_n_sample > 1 and (i + 1) % jump_length == 0 and i + 1 < len(timesteps):
                 jump_back_idx = max(0, i + 1 - jump_length)
                 t_jump = timesteps[jump_back_idx]
+                
+                print(f"  [Time-Travel] Jumping back from step {i} to {jump_back_idx} ({jump_n_sample - 1} times)")
 
                 for _ in range(jump_n_sample - 1):
                     # Forward-diffuse x_t back to t_jump noise level
@@ -218,7 +224,9 @@ class GeneratorInpainter:
         canvas_snapshot = canvas.copy()
         mask_snapshot = mask.copy()
 
-        for y_s, y_e, x_s, x_e in seam_regions:
+        seam_count = len(seam_regions)
+        for idx, (y_s, y_e, x_s, x_e) in enumerate(seam_regions):
+            print(f"  Inpainting seam {idx + 1}/{seam_count}...")
             local_canvas = np.expand_dims(canvas_snapshot[:, y_s:y_e, x_s:x_e], 0)
             local_mask = np.expand_dims(mask_snapshot[:, y_s:y_e, x_s:x_e], 0)
 
