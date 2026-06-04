@@ -27,15 +27,35 @@ def _load_ddpm_checkpoint(model, ckpt_path, device):
     except RuntimeError as e:
         # Re-run non-strict purely to enumerate exactly what didn't line up.
         result = model.load_state_dict(clean_state_dict, strict=False)
+
+        # Cross-attention transformer blocks only exist in the CONDITIONAL model.
+        # If they show up where the target model didn't expect them (or are absent
+        # where it did), the wrong *kind* of checkpoint was passed — e.g. handing a
+        # conditional .pt to the unconditional slot. That's a model-type mix-up,
+        # not a diffusers version drift.
+        ckpt_is_conditional = any("transformer_blocks" in k for k in result.unexpected_keys)
+        model_is_conditional = any("transformer_blocks" in k for k in result.missing_keys)
+        if ckpt_is_conditional or model_is_conditional:
+            kind = "conditional" if ckpt_is_conditional else "unconditional"
+            hint = (
+                f"Model-type mismatch: the checkpoint is a {kind.upper()} model but you are "
+                f"loading it into {type(model).__name__}. Pass a conditional checkpoint to "
+                f"--cond_ckpt and an unconditional checkpoint to --uncond_ckpt — do NOT reuse "
+                f"the same file for both."
+            )
+        else:
+            hint = (
+                "This usually means the installed 'diffusers' version differs from the one used "
+                "to train this checkpoint (diffusers renames internal UNet submodules between "
+                "releases). Pin diffusers to the training version in requirements.txt, or remap "
+                "the keys. Do NOT silence this with strict=False — that runs the model on random "
+                "weights and produces pure-noise output."
+            )
         raise RuntimeError(
             f"Failed to load checkpoint '{ckpt_path}' into {type(model).__name__}.\n"
             f"  Missing keys (in model, absent from checkpoint): {len(result.missing_keys)}\n"
             f"  Unexpected keys (in checkpoint, absent from model): {len(result.unexpected_keys)}\n"
-            f"This almost always means the installed 'diffusers' version differs from the one used "
-            f"to train this checkpoint (diffusers renames internal UNet submodules between releases). "
-            f"Pin diffusers to the training version in requirements.txt, or remap the keys. "
-            f"Do NOT silence this with strict=False — that runs the model on random weights and "
-            f"produces pure-noise output.\n"
+            f"{hint}\n"
             f"  First missing keys:    {result.missing_keys[:5]}\n"
             f"  First unexpected keys: {result.unexpected_keys[:5]}\n"
             f"Original error: {e}"

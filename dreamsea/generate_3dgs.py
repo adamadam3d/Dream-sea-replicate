@@ -18,13 +18,34 @@ def generate_3dgs(cond_ckpt, uncond_ckpt, grid_size=3, roughness=0.5,
     """
     os.makedirs(output_dir, exist_ok=True)
 
-    # 1. Initialize Generator with both checkpoints
+    # The unconditional model is only used for (a) seam inpainting when NOT using
+    # conditional stitching, and (b) SDS optimization. Skip requiring/loading it
+    # otherwise so a run that needs only the conditional model isn't blocked.
+    uncond_needed = (not use_conditional_stitching) or (sds_iterations > 0)
+    if uncond_needed and not uncond_ckpt:
+        reasons = []
+        if not use_conditional_stitching:
+            reasons.append("seam inpainting uses the unconditional model "
+                           "(add --use_conditional_stitching to inpaint seams with the conditional model)")
+        if sds_iterations > 0:
+            reasons.append("SDS optimization uses the unconditional model "
+                           "(set --sds_iterations 0 to skip it)")
+        raise ValueError("--uncond_ckpt is required here because " + "; and ".join(reasons) + ".")
+    # Only load the unconditional model when it will actually be used; this avoids
+    # blocking a conditional-only run (and avoids a spurious load failure if an
+    # unused/incorrect path was passed).
+    uncond_to_load = uncond_ckpt if uncond_needed else None
+    if uncond_ckpt and not uncond_needed:
+        print("Note: --uncond_ckpt is not needed for this run (conditional stitching + no SDS); "
+              "skipping it.")
+
+    # 1. Initialize Generator
     print(f"\n--- 1. Initializing Generator ---")
     print(f"Loading Conditional Checkpoint: {cond_ckpt}")
-    print(f"Loading Unconditional Checkpoint: {uncond_ckpt}")
+    print(f"Loading Unconditional Checkpoint: {uncond_to_load if uncond_to_load else '(none — not needed)'}")
     generator = GeneratorInpainter(
         cond_model_path=cond_ckpt,
-        uncond_model_path=uncond_ckpt,
+        uncond_model_path=uncond_to_load,
         device=device
     )
 
@@ -85,14 +106,17 @@ def generate_3dgs(cond_ckpt, uncond_ckpt, grid_size=3, roughness=0.5,
     print("3DGS model initialized.")
 
     # 5. SDS Optimization
-    print(f"\n--- 5. Optimizing 3DGS via SDS ({sds_iterations} iterations) ---")
-    # Reuse the scheduler that was already created inside the generator
-    gs_opt.optimize_3dgs_sds(
-        model=gs_model,
-        diffusion_model=generator.uncond_model,
-        scheduler=generator.scheduler,
-        iterations=sds_iterations
-    )
+    if sds_iterations > 0:
+        print(f"\n--- 5. Optimizing 3DGS via SDS ({sds_iterations} iterations) ---")
+        # Reuse the scheduler that was already created inside the generator
+        gs_opt.optimize_3dgs_sds(
+            model=gs_model,
+            diffusion_model=generator.uncond_model,
+            scheduler=generator.scheduler,
+            iterations=sds_iterations
+        )
+    else:
+        print("\n--- 5. Skipping SDS optimization (--sds_iterations 0) ---")
 
     # 6. Save Results
     # We save a dictionary that includes positions so the .pt can be converted to .ply
@@ -114,7 +138,10 @@ def generate_3dgs(cond_ckpt, uncond_ckpt, grid_size=3, roughness=0.5,
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate a 3DGS scene from trained DreamSea checkpoints.")
     parser.add_argument("--cond_ckpt", type=str, required=True, help="Path to the conditional DDPM checkpoint.")
-    parser.add_argument("--uncond_ckpt", type=str, required=True, help="Path to the unconditional DDPM checkpoint.")
+    parser.add_argument("--uncond_ckpt", type=str, default=None,
+                        help="Path to the unconditional DDPM checkpoint. Only required when NOT "
+                             "using --use_conditional_stitching, or when --sds_iterations > 0. "
+                             "Do not pass the conditional checkpoint here.")
     parser.add_argument("--grid_size", type=int, default=3, help="Latent grid size (must be 2^n + 1, e.g., 3, 5, 9, or 1 for a single patch).")
     parser.add_argument("--roughness", type=float, default=0.5, help="Fractal roughness.")
     parser.add_argument("--sds_iterations", type=int, default=100, help="Number of SDS optimization steps.")
