@@ -3,7 +3,11 @@ torch
 torchvision
 torchaudio
 transformers
-diffusers
+# IMPORTANT: diffusers must match the version used to TRAIN the checkpoints.
+# Different releases rename internal UNet submodules, which breaks weight loading
+# (load_state_dict in generation_inpainting.py now fails loudly on a mismatch).
+# If checkpoint loading errors, change this pin to your training version.
+diffusers==0.27.2
 accelerate
 
 # Data Processing & Math

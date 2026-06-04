@@ -3,6 +3,45 @@ import numpy as np
 from diffusers import DDPMScheduler
 from .models import ConditionalDDPM, UnconditionalDDPM
 
+
+def _load_ddpm_checkpoint(model, ckpt_path, device):
+    """Load a DDPM checkpoint into `model`, failing loudly on any key mismatch.
+
+    A silent partial load (strict=False) leaves the unmatched layers at their
+    random initialization. A UNet with random weights emits garbage "noise"
+    predictions, so the reverse diffusion never denoises and the output collapses
+    to rainbow static. We therefore load with strict=True and, on failure, raise
+    a clear, actionable error instead of running on a half-initialized model.
+    """
+    checkpoint = torch.load(ckpt_path, map_location=device, weights_only=False)
+    # Support both new dict-based and old raw state_dict checkpoint formats
+    if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+        state_dict = checkpoint['model_state_dict']
+    else:
+        state_dict = checkpoint
+    # Safely remove 'module.' prefix ONLY if it is at the very beginning
+    clean_state_dict = {k[7:] if k.startswith('module.') else k: v for k, v in state_dict.items()}
+
+    try:
+        model.load_state_dict(clean_state_dict, strict=True)
+    except RuntimeError as e:
+        # Re-run non-strict purely to enumerate exactly what didn't line up.
+        result = model.load_state_dict(clean_state_dict, strict=False)
+        raise RuntimeError(
+            f"Failed to load checkpoint '{ckpt_path}' into {type(model).__name__}.\n"
+            f"  Missing keys (in model, absent from checkpoint): {len(result.missing_keys)}\n"
+            f"  Unexpected keys (in checkpoint, absent from model): {len(result.unexpected_keys)}\n"
+            f"This almost always means the installed 'diffusers' version differs from the one used "
+            f"to train this checkpoint (diffusers renames internal UNet submodules between releases). "
+            f"Pin diffusers to the training version in requirements.txt, or remap the keys. "
+            f"Do NOT silence this with strict=False — that runs the model on random weights and "
+            f"produces pure-noise output.\n"
+            f"  First missing keys:    {result.missing_keys[:5]}\n"
+            f"  First unexpected keys: {result.unexpected_keys[:5]}\n"
+            f"Original error: {e}"
+        ) from e
+
+
 class GeneratorInpainter:
     def __init__(self, cond_model_path=None, uncond_model_path=None, device='cuda' if torch.cuda.is_available() else 'cpu'):
         self.device = device
@@ -10,30 +49,13 @@ class GeneratorInpainter:
         # Load conditional DDPM
         self.cond_model = ConditionalDDPM().to(device)
         if cond_model_path:
-            checkpoint = torch.load(cond_model_path, map_location=device, weights_only=False)
-            # Support both new dict-based and old raw state_dict checkpoint formats
-            if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
-                state_dict = checkpoint['model_state_dict']
-            else:
-                state_dict = checkpoint
-            # Safely remove 'module.' prefix ONLY if it is at the very beginning
-            clean_state_dict = {k[7:] if k.startswith('module.') else k: v for k, v in state_dict.items()}
-            
-            # Diffusers occasionally updates its internal block naming (e.g., from direct 'group_norm'
-            # to nested 'transformer_blocks'). Using strict=False bypasses missing/unexpected key errors.
-            self.cond_model.load_state_dict(clean_state_dict, strict=False)
+            _load_ddpm_checkpoint(self.cond_model, cond_model_path, device)
         self.cond_model.eval()
 
         # Load unconditional DDPM
         self.uncond_model = UnconditionalDDPM().to(device)
         if uncond_model_path:
-            checkpoint = torch.load(uncond_model_path, map_location=device, weights_only=False)
-            if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
-                state_dict = checkpoint['model_state_dict']
-            else:
-                state_dict = checkpoint
-            clean_state_dict = {k[7:] if k.startswith('module.') else k: v for k, v in state_dict.items()}
-            self.uncond_model.load_state_dict(clean_state_dict, strict=False)
+            _load_ddpm_checkpoint(self.uncond_model, uncond_model_path, device)
         self.uncond_model.eval()
 
         self.scheduler = DDPMScheduler(num_train_timesteps=1000)
@@ -82,6 +104,23 @@ class GeneratorInpainter:
                 patch_grid[y, x] = patch[0]
 
         return patch_grid
+
+    def _forward_to_noisier(self, x, from_t, to_t):
+        """Forward-diffuse an already-noised sample from noise level `from_t` up
+        to a noisier level `to_t` (to_t > from_t) using the closed-form
+        q(x_{to_t} | x_{from_t}) of the diffusion forward process.
+
+        This is the correct step for RePaint time-travel resampling. It must NOT
+        be confused with scheduler.add_noise, which assumes its input is the
+        clean x_0 and would therefore re-noise an already-noised sample all the
+        way to near-pure noise.
+        """
+        alphas_cumprod = self.scheduler.alphas_cumprod.to(x.device)
+        a_from = alphas_cumprod[from_t]
+        a_to = alphas_cumprod[to_t]
+        ratio = a_to / a_from  # in (0, 1] since to_t is the noisier level
+        noise = torch.randn_like(x)
+        return torch.sqrt(ratio) * x + torch.sqrt(1.0 - ratio) * noise
 
     @torch.no_grad()
     def repaint_inpaint(self, image_input, mask, num_inference_steps=1000, jump_length=10, jump_n_sample=10, latent_condition=None):
@@ -145,21 +184,22 @@ class GeneratorInpainter:
 
             x_t = mask * x_known + (1 - mask) * x_unknown
 
-            # RePaint time-travel: every jump_length steps, re-noise and resample
-            # jump_n_sample-1 extra times so the model can harmonise the boundary.
+            # RePaint time-travel: every jump_length steps, jump back up the noise
+            # schedule and resample jump_n_sample-1 extra times so the model can
+            # harmonise the boundary.
             if jump_n_sample > 1 and (i + 1) % jump_length == 0 and i + 1 < len(timesteps):
                 jump_back_idx = max(0, i + 1 - jump_length)
                 t_jump = timesteps[jump_back_idx]
-                
+                # x_t currently sits at the noise level we just stepped down to.
+                cur_level = timesteps[i + 1]
+
                 print(f"  [Time-Travel] Jumping back from step {i} to {jump_back_idx} ({jump_n_sample - 1} times)")
 
                 for _ in range(jump_n_sample - 1):
-                    # Forward-diffuse x_t back to t_jump noise level
-                    noise_fwd = torch.randn_like(x_t)
-                    x_t = self.scheduler.add_noise(
-                        x_t, noise_fwd,
-                        torch.tensor([t_jump], device=self.device)
-                    )
+                    # Forward-diffuse x_t from its CURRENT noise level up to t_jump.
+                    # Using scheduler.add_noise here is wrong: it treats x_t as the
+                    # clean x_0 and would blast it to near-pure noise every jump.
+                    x_t = self._forward_to_noisier(x_t, cur_level, t_jump)
                     # Denoise from t_jump back down to the current position
                     for j in range(jump_back_idx, i + 1):
                         t_j = timesteps[j]
