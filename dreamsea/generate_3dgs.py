@@ -58,8 +58,15 @@ def generate_3dgs(cond_ckpt, uncond_ckpt, grid_size=3, roughness=0.5,
     if latent_stats_path and os.path.exists(latent_stats_path):
         with open(latent_stats_path) as f:
             latent_stats = json.load(f)
-        latent_grid = scale_latent_grid(latent_grid, latent_stats["min"], latent_stats["max"])
-        print(f"Latent grid rescaled to training PCA range using: {latent_stats_path}")
+        if "mean" in latent_stats and "std" in latent_stats:
+            latent_grid = scale_latent_grid(latent_grid, latent_stats["mean"], latent_stats["std"])
+        else:
+            # Older stats files stored only min/max — approximate a Gaussian fit
+            # (mean = midpoint, std ~= range/4) so the fixed affine map still works.
+            lo = np.array(latent_stats["min"], dtype=np.float32)
+            hi = np.array(latent_stats["max"], dtype=np.float32)
+            latent_grid = scale_latent_grid(latent_grid, (lo + hi) / 2.0, (hi - lo) / 4.0)
+        print(f"Latent grid mapped into training PCA distribution using: {latent_stats_path}")
     else:
         print("WARNING: No latent_stats_path provided. Fractal grid is NOT calibrated to "
               "training PCA range — generation quality may be reduced.")

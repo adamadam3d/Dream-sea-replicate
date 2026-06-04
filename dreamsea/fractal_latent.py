@@ -1,18 +1,26 @@
 import numpy as np
 
 
-def scale_latent_grid(grid, latent_min, latent_max):
+def scale_latent_grid(grid, latent_mean, latent_std):
     """
-    Rescales a fractal grid (sampled from ~N(0,1)) into the observed PCA
-    coordinate range of the training data.  Pass latent_min / latent_max from
-    the latent_stats.json saved by preprocess_dataset.py.
+    Maps a fractal latent grid (values ~N(0,1)) into the training PCA
+    distribution with a FIXED affine transform:  out = grid * std + mean.
+
+    This is deliberately independent of the particular grid's own spread. The
+    previous implementation normalized by the grid's own min/max, which stretched
+    EVERY grid to fill the full training range and thereby erased the fractal
+    scale factor s that controls terrain diversity (s=0 -> calm/flat, s>0 ->
+    varied; see paper Figs. 11-12). A fixed mean/std map preserves it: a
+    low-variance (calm) field stays tightly clustered in PCA space, a
+    high-variance field spreads out. It is also well-defined for a 1x1 grid
+    (which min/max normalization collapsed to a single corner value).
+
+    Pass latent_mean / latent_std from the latent_stats.json saved by
+    preprocess_dataset.py.
     """
-    latent_min = np.array(latent_min, dtype=np.float32)
-    latent_max = np.array(latent_max, dtype=np.float32)
-    grid_min = grid.min(axis=(0, 1), keepdims=True)
-    grid_max = grid.max(axis=(0, 1), keepdims=True)
-    normalized = (grid - grid_min) / np.maximum(grid_max - grid_min, 1e-8)
-    return normalized * (latent_max - latent_min) + latent_min
+    latent_mean = np.array(latent_mean, dtype=np.float32)
+    latent_std = np.array(latent_std, dtype=np.float32)
+    return (grid * latent_std + latent_mean).astype(np.float32)
 
 
 def diamond_square_2d(size, roughness=0.5, seed=None):

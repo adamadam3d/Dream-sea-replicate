@@ -145,14 +145,20 @@ def optimize_3dgs_sds(model, diffusion_model, scheduler, iterations=1000):
     """
     Optimization loop for 3DGS using SDS loss.
     """
+    # The simplified scatter renderer in GaussianSplattingModel.forward only uses
+    # color (features_dc) and opacity; it does NOT use the Gaussian covariance
+    # (scaling/rotation), so those receive no gradient. Including them here was
+    # misleading — we only optimize the appearance terms the renderer actually
+    # differentiates through. scaling/rotation keep their depth-based init (which
+    # export_ply.py reads). A faithful covariance optimization would require a real
+    # differentiable Gaussian rasterizer and multi-view rendering (paper Eq. 4).
     optimizer = torch.optim.Adam([
-        {'params': [model.scaling], 'lr': 0.005},
-        {'params': [model.rotation], 'lr': 0.001},
         {'params': [model.opacity], 'lr': 0.05},
         {'params': [model.features_dc], 'lr': 0.01}
     ])
 
-    # Note: model.positions requires_grad=False so it's not optimized
+    # Note: positions are frozen by design (requires_grad=False); scaling/rotation
+    # are not optimized because the simplified renderer doesn't use them.
 
     print("Starting 3DGS SDS optimization...")
     for i in range(iterations):
