@@ -9,6 +9,17 @@ from dreamsea.fractal_latent import diamond_square_2d, scale_latent_grid
 from dreamsea.generation_inpainting import GeneratorInpainter
 import dreamsea.gs_sds_optimization as gs_opt
 
+# Default latent-space statistics: 2-component PCA of DINOv2 features from a
+# representative preprocessed dataset. Used to calibrate the fractal grid into the
+# training PCA range when no --latent_stats_path is given. Override by passing a
+# latent_stats.json from your own preprocess_dataset.py run.
+DEFAULT_LATENT_STATS = {
+    "min":  [-25.790103912353516, -16.195302963256836],
+    "max":  [ 26.72313690185547,   30.283246994018555],
+    "mean": [-8.705721938895294e-07, 2.0599543404387077e-06],
+    "std":  [ 14.020397186279297,   8.373991966247559],
+}
+
 def generate_3dgs(cond_ckpt, uncond_ckpt, grid_size=3, roughness=0.5,
                   output_dir="outputs", sds_iterations=500,
                   latent_stats_path=None, use_conditional_stitching=False,
@@ -54,23 +65,29 @@ def generate_3dgs(cond_ckpt, uncond_ckpt, grid_size=3, roughness=0.5,
     print(f"\n--- 2. Generating Fractal Latent Grid (size: {grid_size}x{grid_size}) ---")
     latent_grid = diamond_square_2d(grid_size, roughness=roughness)
 
-    # Rescale the grid into the PCA coordinate range seen during training so
-    # the conditional model receives in-distribution latent vectors.
+    # Rescale the grid into the PCA coordinate range seen during training so the
+    # conditional model receives in-distribution latent vectors. Use an explicit
+    # stats file if given, otherwise fall back to the built-in DEFAULT_LATENT_STATS.
     if latent_stats_path and os.path.exists(latent_stats_path):
         with open(latent_stats_path) as f:
             latent_stats = json.load(f)
-        if "mean" in latent_stats and "std" in latent_stats:
-            latent_grid = scale_latent_grid(latent_grid, latent_stats["mean"], latent_stats["std"])
-        else:
-            # Older stats files stored only min/max — approximate a Gaussian fit
-            # (mean = midpoint, std ~= range/4) so the fixed affine map still works.
-            lo = np.array(latent_stats["min"], dtype=np.float32)
-            hi = np.array(latent_stats["max"], dtype=np.float32)
-            latent_grid = scale_latent_grid(latent_grid, (lo + hi) / 2.0, (hi - lo) / 4.0)
-        print(f"Latent grid mapped into training PCA distribution using: {latent_stats_path}")
+        stats_source = latent_stats_path
     else:
-        print("WARNING: No latent_stats_path provided. Fractal grid is NOT calibrated to "
-              "training PCA range — generation quality may be reduced.")
+        latent_stats = DEFAULT_LATENT_STATS
+        stats_source = "built-in DEFAULT_LATENT_STATS"
+        if latent_stats_path:
+            print(f"WARNING: latent_stats_path '{latent_stats_path}' not found; "
+                  f"falling back to built-in default latent stats.")
+
+    if "mean" in latent_stats and "std" in latent_stats:
+        latent_grid = scale_latent_grid(latent_grid, latent_stats["mean"], latent_stats["std"])
+    else:
+        # Older stats files stored only min/max — approximate a Gaussian fit
+        # (mean = midpoint, std ~= range/4) so the fixed affine map still works.
+        lo = np.array(latent_stats["min"], dtype=np.float32)
+        hi = np.array(latent_stats["max"], dtype=np.float32)
+        latent_grid = scale_latent_grid(latent_grid, (lo + hi) / 2.0, (hi - lo) / 4.0)
+    print(f"Latent grid mapped into training PCA distribution using: {stats_source}")
 
     print(f"Latent grid generated.")
 
@@ -167,7 +184,8 @@ if __name__ == "__main__":
     parser.add_argument("--output_dir", type=str, default="outputs/3dgs_gen", help="Directory to save output files.")
     parser.add_argument("--latent_stats_path", type=str, default=None,
                         help="Path to latent_stats.json from preprocessing. Rescales fractal "
-                             "grid into the training PCA range for in-distribution generation.")
+                             "grid into the training PCA range for in-distribution generation. "
+                             "If omitted, the built-in DEFAULT_LATENT_STATS are used.")
     parser.add_argument("--use_conditional_stitching", action="store_true",
                         help="Use the conditional DDPM for inpainting seams (averages latent vectors of adjacent patches).")
     parser.add_argument("--rasterizer", type=str, choices=["scatter", "gsplat"], default="gsplat",
