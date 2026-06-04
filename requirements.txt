@@ -20,3 +20,9 @@ scipy
 tqdm
 packaging
 pathlib
+
+# Real differentiable Gaussian rasterizer for faithful multi-view SDS. This is now
+# the DEFAULT SDS renderer in generate_3dgs.py (--rasterizer gsplat). CUDA toolkit
+# required. Only needed when running SDS (sds_iterations > 0); the 'scatter'
+# fallback (--rasterizer scatter) needs no extra deps. Install with: pip install gsplat
+gsplat

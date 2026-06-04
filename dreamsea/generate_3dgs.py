@@ -12,6 +12,7 @@ import dreamsea.gs_sds_optimization as gs_opt
 def generate_3dgs(cond_ckpt, uncond_ckpt, grid_size=3, roughness=0.5,
                   output_dir="outputs", sds_iterations=500,
                   latent_stats_path=None, use_conditional_stitching=False,
+                  rasterizer="gsplat",
                   device='cuda' if torch.cuda.is_available() else 'cpu'):
     """
     Full pipeline to generate a 3DGS scene from trained checkpoints.
@@ -114,14 +115,25 @@ def generate_3dgs(cond_ckpt, uncond_ckpt, grid_size=3, roughness=0.5,
 
     # 5. SDS Optimization
     if sds_iterations > 0:
-        print(f"\n--- 5. Optimizing 3DGS via SDS ({sds_iterations} iterations) ---")
-        # Reuse the scheduler that was already created inside the generator
-        gs_opt.optimize_3dgs_sds(
-            model=gs_model,
-            diffusion_model=generator.uncond_model,
-            scheduler=generator.scheduler,
-            iterations=sds_iterations
-        )
+        print(f"\n--- 5. Optimizing 3DGS via SDS ({sds_iterations} iterations, "
+              f"rasterizer={rasterizer}) ---")
+        if rasterizer == "gsplat":
+            # Faithful multi-view SDS with a real differentiable Gaussian rasterizer.
+            from dreamsea.gs_sds_optimization_v2 import optimize_3dgs_sds_multiview
+            optimize_3dgs_sds_multiview(
+                model=gs_model,
+                diffusion_model=generator.uncond_model,
+                scheduler=generator.scheduler,
+                iterations=sds_iterations,
+            )
+        else:
+            # Simplified single-view scatter renderer (color/opacity only).
+            gs_opt.optimize_3dgs_sds(
+                model=gs_model,
+                diffusion_model=generator.uncond_model,
+                scheduler=generator.scheduler,
+                iterations=sds_iterations
+            )
     else:
         print("\n--- 5. Skipping SDS optimization (--sds_iterations 0) ---")
 
@@ -158,6 +170,11 @@ if __name__ == "__main__":
                              "grid into the training PCA range for in-distribution generation.")
     parser.add_argument("--use_conditional_stitching", action="store_true",
                         help="Use the conditional DDPM for inpainting seams (averages latent vectors of adjacent patches).")
+    parser.add_argument("--rasterizer", type=str, choices=["scatter", "gsplat"], default="gsplat",
+                        help="SDS renderer. 'gsplat' = faithful multi-view differentiable Gaussian "
+                             "rasterizer (default; requires `pip install gsplat` and a CUDA device). "
+                             "'scatter' = simplified single-view top-down fallback (color/opacity only, "
+                             "no extra deps).")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Compute device.")
 
     args = parser.parse_args()
@@ -171,5 +188,6 @@ if __name__ == "__main__":
         output_dir=args.output_dir,
         latent_stats_path=args.latent_stats_path,
         use_conditional_stitching=args.use_conditional_stitching,
+        rasterizer=args.rasterizer,
         device=args.device
     )
