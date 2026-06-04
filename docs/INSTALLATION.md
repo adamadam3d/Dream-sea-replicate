@@ -55,15 +55,30 @@ pip install torch torchvision torchaudio --index-url https://download.pytorch.or
 
 ### 3. Install Required Libraries
 
-DreamSea relies on several core libraries including `diffusers`, `transformers`, and basic data science packages.
-
-Install the required packages using `pip`:
+DreamSea relies on several core libraries including `diffusers`, `transformers`, and basic data science packages. Install them from the pinned `requirements.txt`:
 
 ```bash
-pip install diffusers transformers numpy scikit-learn Pillow
+pip install -r requirements.txt
 ```
 
-### 4. Clone the Repository
+> **Why `diffusers` is pinned.** `requirements.txt` pins `diffusers==0.27.2`.
+> Different `diffusers` releases rename internal U-Net submodules, which breaks
+> checkpoint loading (the loader fails loudly rather than silently dropping
+> weights). If you trained your checkpoints with a different version, change the
+> pin to match — do **not** work around it with `strict=False`.
+
+### 4. (Optional) Install gsplat for SDS
+
+The default SDS renderer (`--rasterizer gsplat`) uses a real differentiable
+Gaussian rasterizer, which needs a CUDA toolkit. It is only required when running
+SDS (`--sds_iterations > 0`); otherwise you can use `--rasterizer scatter`, which
+has no extra dependencies.
+
+```bash
+pip install gsplat
+```
+
+### 5. Clone the Repository
 
 Clone the DreamSea repository to your local machine:
 
@@ -74,7 +89,7 @@ cd dreamsea
 
 *(Replace the URL with the actual repository URL if applicable).*
 
-### 5. Verify the Installation
+### 6. Verify the Installation
 
 To verify that the installation was successful and all components load correctly, you can run the dummy end-to-end integration test:
 

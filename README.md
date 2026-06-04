@@ -33,7 +33,7 @@ The pipeline consists of several modular steps that convert standard 2D RGB imag
 5. **3D Gaussian Splatting (3DGS) Optimization**:
    - Unprojects the final stitched RGBD map into a dense 3D Point Cloud.
    - Initializes a 3D Gaussian Splatting model. The 3D positions of the Gaussians are explicitly frozen to prevent memory overflow.
-   - Optimizes the appearance parameters (scaling, rotation, opacity, and spherical harmonic colors) using Score Distillation Sampling (SDS) loss from the 2D diffusion priors.
+   - Optimizes the appearance parameters (scaling, rotation, opacity, and per-Gaussian RGB color) using Score Distillation Sampling (SDS) loss from the 2D unconditional diffusion prior. The default renderer is a real multi-view gsplat rasterizer (`--rasterizer gsplat`), with a dependency-free `scatter` fallback.
 
 ## Requirements
 
@@ -58,4 +58,21 @@ To run a dummy end-to-end integration test of the pipeline (verifying that all t
 PYTHONPATH=. python dreamsea/main.py
 ```
 
-This will run an abbreviated version of the generation, stitching, and 3DGS optimization steps on a tiny grid footprint. For more detailed usage instructions, please see the [Usage Guide](docs/USAGE.md).
+This will run an abbreviated version of the generation, stitching, and 3DGS optimization steps on a tiny grid footprint.
+
+To generate a real scene from trained checkpoints and export a `.ply`:
+
+```bash
+python -m dreamsea.generate_3dgs \
+  --cond_ckpt   checkpoints/conditional_epoch_2000.pt \
+  --uncond_ckpt checkpoints/unconditional_epoch_2000.pt \
+  --grid_size 3 \
+  --latent_stats_path /path/to/processed/data/latent_stats.json \
+  --sds_iterations 100 \
+  --output_dir outputs/3dgs_gen
+```
+
+Pass separate conditional and unconditional checkpoints (never the same file for
+both). `--sds_iterations 0` skips SDS; `--rasterizer scatter` avoids the gsplat
+dependency. For full flag documentation and troubleshooting, see the
+[Usage Guide](docs/USAGE.md).

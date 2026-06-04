@@ -64,6 +64,45 @@ python -m dreamsea.generate_sample \
   --num_inference_steps 1000
 ```
 
+## Generating a 3D Scene (`generate_3dgs`)
+
+`generate_3dgs` is the full production pipeline: it builds a fractal latent grid,
+generates and stitches RGBD patches, lifts them to a 3D Gaussian Splatting model,
+optionally refines it with SDS, and exports a `.ply` for viewing.
+
+```bash
+python -m dreamsea.generate_3dgs \
+  --cond_ckpt   checkpoints/conditional_epoch_2000.pt \
+  --uncond_ckpt checkpoints/unconditional_epoch_2000.pt \
+  --grid_size 3 \
+  --roughness 0.5 \
+  --latent_stats_path /path/to/processed/data/latent_stats.json \
+  --sds_iterations 100 \
+  --rasterizer gsplat \
+  --output_dir outputs/3dgs_gen
+```
+
+Outputs (in `--output_dir`): `global_rgbd_map.pt`, `global_rgb_map.png`,
+`final_gs_model.pt`, and `final_gs_model.ply`.
+
+### Key arguments
+
+| Flag | Default | Purpose |
+| --- | --- | --- |
+| `--cond_ckpt` | *(required)* | Conditional DDPM checkpoint — generates the RGBD patches. |
+| `--uncond_ckpt` | `None` | Unconditional DDPM checkpoint. Required only when **not** using `--use_conditional_stitching`, or when `--sds_iterations > 0` (SDS uses it as the prior). Do **not** pass the conditional checkpoint here. |
+| `--grid_size` | `3` | Latent grid size; must be `2^n + 1` (e.g. `3`, `5`, `9`) or `1` for a single patch. |
+| `--roughness` | `0.5` | Diamond-Square roughness — higher = more varied terrain. |
+| `--latent_stats_path` | `None` | `latent_stats.json` from preprocessing, used to calibrate the fractal grid into the training PCA range. If omitted, the built-in `DEFAULT_LATENT_STATS` are used. **Pass the file, not the `conditions/` directory.** |
+| `--use_conditional_stitching` | off | Inpaint seams with the conditional model instead of the unconditional one. The paper uses the unconditional model (fewer boundary artifacts), which is the default. |
+| `--sds_iterations` | `100` | SDS refinement steps. Set `0` to skip SDS entirely (and skip needing `--uncond_ckpt` when also using conditional stitching). |
+| `--rasterizer` | `gsplat` | `gsplat` = faithful multi-view differentiable rasterizer (needs `pip install gsplat` + CUDA). `scatter` = simplified single-view fallback, no extra deps. |
+| `--device` | auto | `cuda` or `cpu`. `gsplat` SDS requires `cuda`. |
+
+> **Latent stats live at the preprocessing root**, e.g.
+> `/path/to/processed/data/latent_stats.json` (saved next to `pca_model.pkl`),
+> not inside the `conditions/` subfolder.
+
 ## Interacting with Individual Modules
 
 You can also use individual modules of the DreamSea pipeline in your own scripts.
@@ -133,9 +172,36 @@ gs_model = gs_opt.GaussianSplattingModel(positions, colors)
 
 # 3. Setup models for SDS loss computation
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
-uncond_model = UnconditionalDDPM(in_channels=3, out_channels=3).to(device)
+uncond_model = UnconditionalDDPM().to(device)  # 4-channel RGBD model (in/out = 4)
 scheduler = DDPMScheduler(num_train_timesteps=1000)
 
-# 4. Optimize
+# 4. Optimize (simplified single-view scatter renderer)
 gs_opt.optimize_3dgs_sds(gs_model, uncond_model, scheduler, iterations=100)
+
+# 4b. Or use the faithful multi-view gsplat renderer (CUDA + `pip install gsplat`)
+from dreamsea.gs_sds_optimization_v2 import optimize_3dgs_sds_multiview
+optimize_3dgs_sds_multiview(gs_model, uncond_model, scheduler, iterations=100)
 ```
+
+## Troubleshooting
+
+- **`RuntimeError: ... missing/unexpected keys` when loading a checkpoint.**
+  You likely passed a conditional checkpoint to `--uncond_ckpt` (or vice versa).
+  The two models have different architectures (the conditional one has
+  cross-attention `transformer_blocks`); the loader checks this strictly and
+  refuses to silently load partial weights — partial loading leaves random
+  weights and produces noise. Train and pass a separate unconditional checkpoint,
+  or set `--sds_iterations 0 --use_conditional_stitching` to avoid needing one.
+
+- **`IsADirectoryError` on `--latent_stats_path`.** Point it at the
+  `latent_stats.json` *file* at the preprocessing root, not the `conditions/`
+  directory.
+
+- **`ImportError: gsplat is required` / `gsplat requires a CUDA device`.** The
+  default `--rasterizer gsplat` needs `pip install gsplat` and `--device cuda`.
+  Use `--rasterizer scatter` for a no-dependency CPU/GPU fallback.
+
+- **Output looks low quality / blurry.** Most often an undertrained checkpoint
+  (the paper trains ~2000 epochs), a `--grid_size 1` single patch, or an
+  uncalibrated latent grid — pass `--latent_stats_path` (or rely on the built-in
+  defaults) so the fractal grid lands in the training PCA range.
