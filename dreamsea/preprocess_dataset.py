@@ -114,9 +114,9 @@ def preprocess_dataset(input_dir: str, output_dir: str, device: str = 'cuda'):
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Preprocess dataset for DreamSea training.")
-    parser.add_argument("--input_dir", type=str, required=True, help="Path to raw RGB images directory")
-    parser.add_argument("--output_dir", type=str, required=True, help="Directory to save preprocessed .pt files")
-    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Compute device")
+    parser.add_argument("-i", "--input_dir", type=str, required=True, help="Path to raw RGB images directory")
+    parser.add_argument("-o", "--output_dir", type=str, required=True, help="Directory to save preprocessed .pt files")
+    parser.add_argument("-d", "--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Compute device")
     
     args = parser.parse_args()
     preprocess_dataset(args.input_dir, args.output_dir, args.device)

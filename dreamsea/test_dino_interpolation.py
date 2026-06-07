@@ -53,29 +53,29 @@ def set_seed(seed):
 
 def main():
     parser = argparse.ArgumentParser(description="Generate images conditioned on interpolated DINO embeddings.")
-    parser.add_argument("--cond_model_path", type=str, default=None,
+    parser.add_argument("-c", "--cond_model_path", type=str, default=None,
                         help="Path to conditional DDPM checkpoint (.pt file). If None, runs with random weights.")
-    parser.add_argument("--steps", type=int, default=5,
+    parser.add_argument("-n", "--steps", type=int, default=5,
                         help="Number of interpolation steps (minimum 2).")
-    parser.add_argument("--start_latent", type=str, default="1.0,-1.0",
+    parser.add_argument("-s", "--start_latent", type=str, default="1.0,-1.0",
                         help="Starting 2D latent condition (comma-separated, e.g. '1.0,-1.0'). Used if images are not provided.")
-    parser.add_argument("--end_latent", type=str, default="-1.0,1.0",
+    parser.add_argument("-e", "--end_latent", type=str, default="-1.0,1.0",
                         help="Ending 2D latent condition (comma-separated, e.g. '-1.0,1.0'). Used if images are not provided.")
-    parser.add_argument("--num_inference_steps", type=int, default=250,
+    parser.add_argument("-i", "--num_inference_steps", type=int, default=250,
                         help="Number of diffusion denoising steps.")
-    parser.add_argument("--output_dir", type=str, default="samples/dino_interpolation",
+    parser.add_argument("-o", "--output_dir", type=str, default="samples/dino_interpolation",
                         help="Directory to save output images.")
-    parser.add_argument("--image_a", type=str, default=None,
+    parser.add_argument("-a", "--image_a", type=str, default=None,
                         help="Optional path to starting real RGB image.")
-    parser.add_argument("--image_b", type=str, default=None,
+    parser.add_argument("-b", "--image_b", type=str, default=None,
                         help="Optional path to ending real RGB image.")
-    parser.add_argument("--pca_model_path", type=str, default=None,
+    parser.add_argument("-p", "--pca_model_path", type=str, default=None,
                         help="Optional path to fitted PCA model (.pkl file) used when real images are provided.")
-    parser.add_argument("--interpolate_high_dim", type=bool, default=True,
+    parser.add_argument("-h", "--interpolate_high_dim", type=bool, default=True,
                         help="If True, interpolates in 1024-dim DINOv2 space before PCA. If False, interpolates in 2D PCA space.")
-    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu",
+    parser.add_argument("-d", "--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu",
                         help="Compute device.")
-    parser.add_argument("--seed", type=int, default=42,
+    parser.add_argument("-x", "--seed", type=int, default=42,
                         help="Random seed for the initial noise.")
     args = parser.parse_args()
 

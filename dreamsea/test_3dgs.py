@@ -64,7 +64,7 @@ def test_3dgs(device):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Test 3D Gaussian Splatting and SDS.")
-    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Compute device.")
+    parser.add_argument("-d", "--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Compute device.")
     args = parser.parse_args()
     
     test_3dgs(args.device)

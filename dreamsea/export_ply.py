@@ -72,8 +72,8 @@ def export_to_ply(checkpoint_path, output_path):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Export DreamSea .pt 3DGS to .ply")
-    parser.add_argument("--input", type=str, required=True, help="Path to .pt model file.")
-    parser.add_argument("--output", type=str, default="model.ply", help="Path to save .ply file.")
+    parser.add_argument("-i", "--input", type=str, required=True, help="Path to .pt model file.")
+    parser.add_argument("-o", "--output", type=str, default="model.ply", help="Path to save .ply file.")
     
     args = parser.parse_args()
     export_to_ply(args.input, args.output)

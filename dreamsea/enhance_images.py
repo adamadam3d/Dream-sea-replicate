@@ -130,9 +130,9 @@ def main():
     parser = argparse.ArgumentParser(description="Underwater Image Enhancement (Gray World + CLAHE or MSRCR)")
     parser.add_argument("--input", "-i", type=str, required=True, help="Path to input image or directory")
     parser.add_argument("--output", "-o", type=str, required=True, help="Path to save enhanced image(s)")
-    parser.add_argument("--no_gw", action="store_true", help="Disable Gray World White Balancing")
-    parser.add_argument("--no_clahe", action="store_true", help="Disable CLAHE enhancement")
-    parser.add_argument("--use_msrcr", action="store_true", help="Use Multi-Scale Retinex with Color Restoration instead of GW+CLAHE")
+    parser.add_argument("--no_gw", "-w", action="store_true", help="Disable Gray World White Balancing")
+    parser.add_argument("--no_clahe", "-c", action="store_true", help="Disable CLAHE enhancement")
+    parser.add_argument("--use_msrcr", "-m", action="store_true", help="Use Multi-Scale Retinex with Color Restoration instead of GW+CLAHE")
     
     args = parser.parse_args()
     

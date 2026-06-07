@@ -24,13 +24,13 @@ def normalize_tensor_to_image(tensor):
 
 def main():
     parser = argparse.ArgumentParser(description="Generate and save an image using trained checkpoints.")
-    parser.add_argument("--cond_model_path", type=str, default=None, help="Path to conditional DDPM checkpoint (.pt file).")
-    parser.add_argument("--output_dir", type=str, default="samples", help="Directory to save the generated images.")
-    parser.add_argument("--num_samples", type=int, default=1, help="Number of samples to generate.")
-    parser.add_argument("--latent_vector", type=str, default="0.5,-0.5", help="Comma-separated latent vector (e.g. '0.0,0.0').")
-    parser.add_argument("--no_random", action="store_true", help="If set, do not add noise to the latent vector between samples.")
-    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Compute device.")
-    parser.add_argument("--num_inference_steps", type=int, default=1000, help="Number of denoising steps (higher = better quality but slower).")
+    parser.add_argument("-c", "--cond_model_path", type=str, default=None, help="Path to conditional DDPM checkpoint (.pt file).")
+    parser.add_argument("-o", "--output_dir", type=str, default="samples", help="Directory to save the generated images.")
+    parser.add_argument("-n", "--num_samples", type=int, default=1, help="Number of samples to generate.")
+    parser.add_argument("-l", "--latent_vector", type=str, default="0.5,-0.5", help="Comma-separated latent vector (e.g. '0.0,0.0').")
+    parser.add_argument("-r", "--no_random", action="store_true", help="If set, do not add noise to the latent vector between samples.")
+    parser.add_argument("-d", "--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Compute device.")
+    parser.add_argument("-s", "--num_inference_steps", type=int, default=1000, help="Number of denoising steps (higher = better quality but slower).")
     args = parser.parse_args()
 
     # Parse latent vector

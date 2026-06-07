@@ -6,9 +6,9 @@ from dreamsea.generation_inpainting import GeneratorInpainter
 
 def main():
     parser = argparse.ArgumentParser(description="Test DDPM inference using trained checkpoints.")
-    parser.add_argument("--cond_model_path", type=str, default=None, help="Path to conditional DDPM checkpoint (.pt file).")
-    parser.add_argument("--uncond_model_path", type=str, default=None, help="Path to unconditional DDPM checkpoint (.pt file).")
-    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Compute device.")
+    parser.add_argument("-c", "--cond_model_path", type=str, default=None, help="Path to conditional DDPM checkpoint (.pt file).")
+    parser.add_argument("-u", "--uncond_model_path", type=str, default=None, help="Path to unconditional DDPM checkpoint (.pt file).")
+    parser.add_argument("-d", "--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Compute device.")
     args = parser.parse_args()
 
     print(f"Initializing GeneratorInpainter on {args.device}...")

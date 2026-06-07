@@ -91,18 +91,18 @@ def save_comparison(path, tiles, depth=False):
 
 def main():
     parser = argparse.ArgumentParser(description="Test RePaint inpainting end to end.")
-    parser.add_argument("--uncond_model_path", type=str, default=None,
+    parser.add_argument("-u", "--uncond_model_path", type=str, default=None,
                         help="Unconditional DDPM checkpoint (used to fill the hole).")
-    parser.add_argument("--cond_model_path", type=str, default=None,
+    parser.add_argument("-c", "--cond_model_path", type=str, default=None,
                         help="Optional conditional checkpoint. If given, a real generated "
                              "patch is used as the known canvas instead of a synthetic one.")
-    parser.add_argument("--num_inference_steps", type=int, default=250)
-    parser.add_argument("--jump_length", type=int, default=10)
-    parser.add_argument("--jump_n_sample", type=int, default=5,
+    parser.add_argument("-i", "--num_inference_steps", type=int, default=250)
+    parser.add_argument("-j", "--jump_length", type=int, default=10)
+    parser.add_argument("-n", "--jump_n_sample", type=int, default=5,
                         help="RePaint time-travel resamples per jump (1 disables time-travel).")
-    parser.add_argument("--output_dir", type=str, default="samples/inpaint_test")
-    parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--device", type=str,
+    parser.add_argument("-o", "--output_dir", type=str, default="samples/inpaint_test")
+    parser.add_argument("-x", "--seed", type=int, default=0)
+    parser.add_argument("-d", "--device", type=str,
                         default="cuda" if torch.cuda.is_available() else "cpu")
     args = parser.parse_args()
 

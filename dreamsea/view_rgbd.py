@@ -276,15 +276,15 @@ if __name__ == "__main__":
     )
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument(
-        "--data_dir", type=str,
+        "-d", "--data_dir", type=str,
         help="Path to preprocessed output directory (containing 'rgbd/' folder with .pt files)"
     )
     group.add_argument(
-        "--raw_dir", type=str,
+        "-r", "--raw_dir", type=str,
         help="Path to raw RGB images directory (will run depth estimation live)"
     )
     parser.add_argument(
-        "--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu",
+        "-e", "--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu",
         help="Device for live depth estimation (only used with --raw_dir)"
     )
 

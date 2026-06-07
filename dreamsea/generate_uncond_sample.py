@@ -74,10 +74,10 @@ def generate_unconditional(model_path, output_dir, num_inference_steps=1000, dev
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate and save an image using an UNCONDITIONAL trained checkpoint.")
-    parser.add_argument("--uncond_model_path", type=str, required=True, help="Path to unconditional DDPM checkpoint (.pt file).")
-    parser.add_argument("--output_dir", type=str, default="samples", help="Directory to save the generated images.")
-    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Compute device.")
-    parser.add_argument("--num_inference_steps", type=int, default=1000, help="Number of denoising steps.")
+    parser.add_argument("-u", "--uncond_model_path", type=str, required=True, help="Path to unconditional DDPM checkpoint (.pt file).")
+    parser.add_argument("-o", "--output_dir", type=str, default="samples", help="Directory to save the generated images.")
+    parser.add_argument("-d", "--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Compute device.")
+    parser.add_argument("-s", "--num_inference_steps", type=int, default=1000, help="Number of denoising steps.")
     args = parser.parse_args()
 
     generate_unconditional(
