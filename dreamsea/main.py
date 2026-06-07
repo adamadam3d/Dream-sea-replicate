@@ -40,7 +40,7 @@ def main():
 
     # Step 4: 3D Gaussian Splatting Initialization
     print("\n--- 4. Initializing 3D Gaussian Splatting ---")
-    positions, colors = gs_opt.create_point_cloud_from_rgbd(global_map)
+    positions, colors, _ = gs_opt.create_point_cloud_from_rgbd(global_map)
     print(f"Extracted {positions.shape[0]} valid points from RGBD map.")
 
     # Only initialize if points were found

@@ -20,7 +20,7 @@ def test_3dgs(device):
 
     # 2. Extract Point Cloud
     print("\n--- 2. Extracting Point Cloud from RGBD ---")
-    positions, colors = gs_opt.create_point_cloud_from_rgbd(dummy_rgbd)
+    positions, colors, _ = gs_opt.create_point_cloud_from_rgbd(dummy_rgbd)
     print(f"Extracted {positions.shape[0]} valid points.")
     
     if positions.shape[0] == 0:

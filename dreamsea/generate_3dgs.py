@@ -21,7 +21,7 @@ DEFAULT_LATENT_STATS = {
 }
 
 def generate_3dgs(cond_ckpt, uncond_ckpt, grid_size=3, roughness=0.5,
-                  output_dir="outputs", sds_iterations=500,
+                  output_dir="outputs", sds_iterations=500, sds_guidance=2.0,
                   latent_stats_path=None, use_conditional_stitching=False,
                   rasterizer="gsplat",
                   device='cuda' if torch.cuda.is_available() else 'cpu'):
@@ -120,14 +120,19 @@ def generate_3dgs(cond_ckpt, uncond_ckpt, grid_size=3, roughness=0.5,
 
     # 4. Initialize 3D Gaussian Splatting
     print("\n--- 4. Initializing 3D Gaussian Splatting ---")
-    positions, colors = gs_opt.create_point_cloud_from_rgbd(global_map)
+    positions, colors, conds = gs_opt.create_point_cloud_from_rgbd(
+        global_map, 
+        latent_grid=latent_grid, 
+        patch_size=224, 
+        overlap_size=32
+    )
     print(f"Extracted {positions.shape[0]} points from map.")
 
     if positions.shape[0] == 0:
         print("Error: No valid points found in RGBD map. Aborting.")
         return
 
-    gs_model = gs_opt.GaussianSplattingModel(positions, colors, device=device)
+    gs_model = gs_opt.GaussianSplattingModel(positions, colors, point_cloud_conds=conds, device=device)
     print("3DGS model initialized.")
 
     # 5. SDS Optimization
@@ -136,12 +141,14 @@ def generate_3dgs(cond_ckpt, uncond_ckpt, grid_size=3, roughness=0.5,
               f"rasterizer={rasterizer}) ---")
         if rasterizer == "gsplat":
             # Faithful multi-view SDS with a real differentiable Gaussian rasterizer.
+            # Using the conditional model with CFG guidance scale on local retrieved condition
             from dreamsea.gs_sds_optimization_v2 import optimize_3dgs_sds_multiview
             optimize_3dgs_sds_multiview(
                 model=gs_model,
-                diffusion_model=generator.uncond_model,
+                diffusion_model=generator.cond_model,
                 scheduler=generator.scheduler,
                 iterations=sds_iterations,
+                guidance=sds_guidance,
             )
         else:
             # Simplified single-view scatter renderer (color/opacity only).
@@ -181,6 +188,7 @@ if __name__ == "__main__":
     parser.add_argument("--grid_size", type=int, default=3, help="Latent grid size (must be 2^n + 1, e.g., 3, 5, 9, or 1 for a single patch).")
     parser.add_argument("--roughness", type=float, default=0.5, help="Fractal roughness.")
     parser.add_argument("--sds_iterations", type=int, default=100, help="Number of SDS optimization steps.")
+    parser.add_argument("--sds_guidance", type=float, default=2.0, help="Classifier-Free Guidance (CFG) scale for conditional SDS.")
     parser.add_argument("--output_dir", type=str, default="outputs/3dgs_gen", help="Directory to save output files.")
     parser.add_argument("--latent_stats_path", type=str, default=None,
                         help="Path to latent_stats.json from preprocessing. Rescales fractal "
@@ -203,6 +211,7 @@ if __name__ == "__main__":
         grid_size=args.grid_size,
         roughness=args.roughness,
         sds_iterations=args.sds_iterations,
+        sds_guidance=args.sds_guidance,
         output_dir=args.output_dir,
         latent_stats_path=args.latent_stats_path,
         use_conditional_stitching=args.use_conditional_stitching,

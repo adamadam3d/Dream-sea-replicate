@@ -3,7 +3,7 @@ import torch.nn as nn
 import numpy as np
 
 class GaussianSplattingModel(nn.Module):
-    def __init__(self, point_cloud_positions, point_cloud_colors, device='cuda' if torch.cuda.is_available() else 'cpu'):
+    def __init__(self, point_cloud_positions, point_cloud_colors, point_cloud_conds=None, device='cuda' if torch.cuda.is_available() else 'cpu'):
         super().__init__()
         self.device = device
         # Freeze 3D positions to prevent memory overflow
@@ -14,9 +14,10 @@ class GaussianSplattingModel(nn.Module):
         # Optimize appearance only (covariance, opacity, radiance)
         # Covariance represented via scaling and rotation (quaternions)
         # Scale proportionally to depth to ensure Gaussians overlap to form a solid surface
+        # Log-space scaling is used here for stability in optimization
         z_vals = self.positions[:, 2:3].detach()
         base_scale = z_vals / 200.0
-        self.scaling = nn.Parameter(base_scale.repeat(1, 3))
+        self.scaling = nn.Parameter(torch.log(base_scale.repeat(1, 3)))
         
         self.rotation = nn.Parameter(torch.zeros((N, 4), dtype=torch.float32).to(self.device))
         self.rotation.data[:, 0] = 1.0 # Initialize real part of quaternion to 1
@@ -31,6 +32,12 @@ class GaussianSplattingModel(nn.Module):
         target_colors = np.clip(target_colors, -0.999, 0.999)
         init_features_dc = np.arctanh(target_colors)
         self.features_dc = nn.Parameter(torch.tensor(init_features_dc, dtype=torch.float32).to(self.device))
+
+        # Store per-point conditioning vectors for conditional SDS
+        if point_cloud_conds is not None:
+            self.point_conds = torch.tensor(point_cloud_conds, dtype=torch.float32, requires_grad=False).to(self.device)
+        else:
+            self.point_conds = torch.zeros((N, 2), dtype=torch.float32, requires_grad=False).to(self.device)
 
     def forward(self, camera=None, canvas_size=224):
         """
@@ -73,9 +80,9 @@ class GaussianSplattingModel(nn.Module):
         rendered = torch.stack(channels, dim=0) / (den.unsqueeze(0) + 1e-8)
         return rendered.view(4, canvas_size, canvas_size).unsqueeze(0)  # (1, 4, H, W)
 
-def create_point_cloud_from_rgbd(rgbd_map, fov=60.0):
+def create_point_cloud_from_rgbd(rgbd_map, fov=60.0, latent_grid=None, patch_size=224, overlap_size=32):
     """
-    Converts a stitched RGBD map into a 3D point cloud.
+    Converts a stitched RGBD map into a 3D point cloud and optionally retrieves the DINO/PCA conditioning vectors per-point.
     rgbd_map: (4, H, W) numpy array, channels are RGB + Depth.
     Accepts values in either [0, 1] or [-1, 1] range (auto-detected).
     """
@@ -107,7 +114,50 @@ def create_point_cloud_from_rgbd(rgbd_map, fov=60.0):
 
     # Filter invalid depths
     valid = z.flatten() > 0.1
-    return positions[valid], colors[valid]
+    
+    positions_valid = positions[valid]
+    colors_valid = colors[valid]
+    
+    # Extract conditioning vectors per-point via bilinear interpolation from latent_grid
+    conds_valid = None
+    if latent_grid is not None:
+        N_y, N_x, _ = latent_grid.shape
+        stride = patch_size - overlap_size
+        
+        # Calculate continuous grid coordinates for each pixel (y, x)
+        gy = y / stride
+        gx = x / stride
+        
+        # Clamp to bounds to prevent out-of-index
+        gy = np.clip(gy, 0.0, N_y - 1.0 - 1e-5)
+        gx = np.clip(gx, 0.0, N_x - 1.0 - 1e-5)
+        
+        gy0 = gy.astype(np.int32)
+        gy1 = gy0 + 1
+        gx0 = gx.astype(np.int32)
+        gx1 = gx0 + 1
+        
+        wy = gy - gy0
+        wx = gx - gx0
+        
+        # Retrieve endpoints
+        c00 = latent_grid[gy0, gx0]  # (H, W, 2)
+        c01 = latent_grid[gy0, gx1]
+        c10 = latent_grid[gy1, gx0]
+        c11 = latent_grid[gy1, gx1]
+        
+        # Interpolate
+        wy = np.expand_dims(wy, -1)
+        wx = np.expand_dims(wx, -1)
+        
+        c0 = c00 * (1 - wx) + c01 * wx
+        c1 = c10 * (1 - wx) + c11 * wx
+        conds = c0 * (1 - wy) + c1 * wy  # (H, W, 2)
+        
+        conds_flat = conds.reshape(-1, 2)
+        conds_valid = conds_flat[valid]
+        
+    return positions_valid, colors_valid, conds_valid
 
 
 def compute_sds_loss(diffusion_model, scheduler, rendered_image, text_embeddings=None):

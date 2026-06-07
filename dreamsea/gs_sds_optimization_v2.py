@@ -55,15 +55,19 @@ def look_at(cam_pos, target, up=(0.0, 0.0, 1.0), device='cuda'):
     return vm
 
 
-def sample_topdown_camera(positions, fov_deg=60.0, device='cuda',
+def sample_topdown_camera(positions, target=None, fov_deg=60.0, device='cuda',
                           elev_min=60.0, elev_max=90.0):
-    """Sample a camera within a near-nadir cone looking at the terrain centre.
+    """Sample a camera within a near-nadir cone looking at the target (or terrain centre if None).
 
     elev is measured from horizontal: 90 deg = straight down. Keep elev_min high
     (~60) so views stay close to top-down, matching the diffusion prior. Widening
     this cone pushes the prior out of distribution and reintroduces artifacts.
     """
-    center = positions.mean(0)
+    if target is None:
+        center = positions.mean(0)
+    else:
+        center = torch.as_tensor(target, dtype=torch.float32, device=device)
+
     extent = (positions.max(0).values - positions.min(0).values).norm()
     dist = 0.6 * extent / math.tan(math.radians(fov_deg) / 2.0)
 
@@ -88,7 +92,7 @@ def render_rgbd(rasterization, model, viewmat, K, H=224, W=224, rgb_only=False):
     """
     means = model.positions                                  # (N,3) frozen
     quats = model.rotation                                   # (N,4) live
-    scales = model.scaling.clamp_min(1e-6)                   # (N,3) live, positive
+    scales = torch.exp(model.scaling)                        # (N,3) live, positive (log-space parameterization)
     opacities = torch.sigmoid(model.opacity).squeeze(-1)     # (N,)
     colors01 = (torch.tanh(model.features_dc) + 1.0) / 2.0   # (N,3) -> [0,1]
 
@@ -178,17 +182,31 @@ def optimize_3dgs_sds_multiview(model, diffusion_model, scheduler, iterations=10
     print(f"Starting multi-view SDS ({iterations} iters, {views_per_iter} views/iter, "
           f"rasterizer=gsplat, rgb_only={rgb_only}, guidance={guidance})...")
     for i in range(iterations):
-        # Anneal the upper timestep from coarse (0.98) to fine (0.50).
+        # Anneal the upper timestep limit from coarse (0.98) to fine (0.40) using a cosine schedule
         frac = i / max(iterations - 1, 1)
-        t_hi = 0.98 - 0.48 * frac
+        cos_val = math.cos(math.pi * frac)  # +1 down to -1
+        t_hi = 0.40 + 0.58 * (cos_val + 1.0) / 2.0
 
         loss = 0.0
         for _ in range(views_per_iter):
-            vm = sample_topdown_camera(model.positions, fov_deg, device, elev_min=elev_min)
+            # Sample a random target point on the terrain surface to serve as camera look-at target
+            num_points = model.positions.shape[0]
+            target_idx = np.random.randint(0, num_points)
+            target_pos = model.positions[target_idx]
+            
+            # Retrieve per-point DINO/PCA conditioning coordinate
+            local_cond = None
+            if hasattr(model, 'point_conds') and model.point_conds is not None:
+                # Shape expected by model: (1, 1, 2)
+                local_cond = model.point_conds[target_idx].view(1, 1, -1)
+            elif cond is not None:
+                local_cond = cond
+
+            vm = sample_topdown_camera(model.positions, target=target_pos, fov_deg=fov_deg, device=device, elev_min=elev_min)
             rgbd = render_rgbd(rasterization, model, vm, K, H, W, rgb_only=rgb_only)
             loss = loss + compute_sds_loss(
                 diffusion_model, scheduler, rgbd.unsqueeze(0),
-                t_hi=t_hi, cond=cond, guidance=guidance,
+                t_hi=t_hi, cond=local_cond, guidance=guidance,
             )
         loss = loss / views_per_iter
 
