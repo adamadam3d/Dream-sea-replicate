@@ -221,21 +221,29 @@ def main():
     # --- Save Collages ---
     print("\n--- Saving Collages ---")
     w, h = all_rgb_images[0].size
-    collage_rgb = Image.new('RGB', (args.steps * w, h))
-    collage_depth = Image.new('L', (args.steps * w, h))
+
+    # Create a combined collage: RGB on top, red-blue depth below, for each step
+    collage = Image.new('RGB', (args.steps * w, h * 2))
 
     for i, (rgb, depth) in enumerate(zip(all_rgb_images, all_depth_images)):
-        collage_rgb.paste(rgb, (i * w, 0))
-        collage_depth.paste(depth, (i * w, 0))
+        # Paste RGB on the top row
+        collage.paste(rgb, (i * w, 0))
 
-    collage_rgb_path = output_dir / "collage_rgb.png"
-    collage_depth_path = output_dir / "collage_depth.png"
-    collage_rgb.save(collage_rgb_path)
-    collage_depth.save(collage_depth_path)
+        # Convert grayscale depth to red-blue colormap:
+        # Near (high depth value) = red, Far (low depth value) = blue
+        depth_np = np.array(depth, dtype=np.float32) / 255.0  # normalize to [0, 1]
+        r = (depth_np * 255).astype(np.uint8)
+        g = np.zeros_like(r)
+        b = ((1.0 - depth_np) * 255).astype(np.uint8)
+        depth_colored = Image.fromarray(np.stack([r, g, b], axis=-1), mode='RGB')
 
-    print(f"Collages saved successfully to:")
-    print(f"  - {collage_rgb_path}")
-    print(f"  - {collage_depth_path}")
+        # Paste depth on the bottom row
+        collage.paste(depth_colored, (i * w, h))
+
+    collage_path = output_dir / "collage_rgb_depth.png"
+    collage.save(collage_path)
+
+    print(f"Combined collage saved to: {collage_path}")
 
     # --- Automated Evaluation Checks ---
     print("\n================ EVALUATION CHECKS ================")

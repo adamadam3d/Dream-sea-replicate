@@ -40,8 +40,9 @@ def export_to_ply(checkpoint_path, output_path):
     f_dc = (f_dc - 0.5) / SH_C0     # [0, 1] → SH DC coefficient
 
     # 2. Scale: Viewers apply exp(stored) to get actual scale.
-    #    Our scaling parameter is in raw (unactivated) space — save log so exp recovers it.
-    scale = np.log(np.clip(scale, 1e-10, None))
+    #    Our scaling parameter is already in log-space (initialized as torch.log(base_scale)
+    #    in GaussianSplattingModel), so save it as-is — no additional log transform needed.
+    #    (Previously this applied np.log again, double-transforming and shrinking Gaussians to ~zero size.)
 
     # 3. Opacity: The raw parameter is already the pre-sigmoid value.
     #    PLY viewers apply sigmoid(stored) to get actual opacity, so save the raw
