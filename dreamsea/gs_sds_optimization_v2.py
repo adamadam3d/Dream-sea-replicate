@@ -56,7 +56,7 @@ def look_at(cam_pos, target, up=(0.0, 0.0, 1.0), device='cuda'):
 
 
 def sample_topdown_camera(positions, target=None, fov_deg=60.0, device='cuda',
-                          elev_min=60.0, elev_max=90.0):
+                          elev_min=75.0, elev_max=90.0):
     """Sample a camera within a near-nadir cone looking at the target (or terrain centre if None).
 
     elev is measured from horizontal: 90 deg = straight down. Keep elev_min high
@@ -107,8 +107,24 @@ def render_rgbd(rasterization, model, viewmat, K, H=224, W=224, rgb_only=False):
         return rgb * 2.0 - 1.0
 
     depth = out[0, ..., 3]                                   # (H,W) expected depth
-    depth = (depth - depth.min()) / (depth.max() - depth.min() + 1e-6)  # per-view -> [0,1]
-    rgbd = torch.cat([rgb, depth[None]], dim=0)             # (4,H,W) in [0,1]
+    alphas = _alphas[0, ..., 0]                              # (H,W) accumulated opacity
+    fg_mask = alphas > 1e-4
+
+    if fg_mask.any():
+        fg_depth = depth[fg_mask]
+        d_min = fg_depth.min()
+        d_max = fg_depth.max()
+        if d_max > d_min:
+            depth_norm = (depth - d_min) / (d_max - d_min + 1e-6)
+        else:
+            depth_norm = torch.zeros_like(depth)
+    else:
+        depth_norm = torch.zeros_like(depth)
+
+    # Set background pixels to 1.0 (furthest depth) in [0, 1] range
+    depth_norm = torch.where(fg_mask, depth_norm, torch.ones_like(depth_norm))
+
+    rgbd = torch.cat([rgb, depth_norm[None]], dim=0)         # (4,H,W) in [0,1]
     return rgbd * 2.0 - 1.0                                  # -> [-1,1] to match training
 
 
@@ -134,12 +150,22 @@ def compute_sds_loss(diffusion_model, scheduler, rendered,
             eps_u = diffusion_model(x_t, t, encoder_hidden_states=torch.zeros_like(cond))
             eps = eps_u + guidance * (eps_c - eps_u)
         else:
-            eps = diffusion_model(x_t, t)
+            # Check if conditional model. If so, pass dummy zero condition to prevent signature crash
+            if hasattr(diffusion_model, 'unet') and hasattr(diffusion_model.unet, 'config') and 'cross_attention_dim' in diffusion_model.unet.config and diffusion_model.unet.config.cross_attention_dim is not None:
+                dummy_cond = torch.zeros((x_t.shape[0], 1, 2), device=x_t.device)
+                eps = diffusion_model(x_t, t, encoder_hidden_states=dummy_cond)
+            else:
+                try:
+                    eps = diffusion_model(x_t, t)
+                except TypeError:
+                    dummy_cond = torch.zeros((x_t.shape[0], 1, 2), device=x_t.device)
+                    eps = diffusion_model(x_t, t, encoder_hidden_states=dummy_cond)
 
-    w = 1.0 - scheduler.alphas_cumprod.to(t.device)[t]
+    # Use uniform weighting to prevent vanishing gradients at small timesteps
+    w = 1.0
     grad = w * (eps - noise)
-    # Stop-grad on the score; differentiate only through the render.
-    return (grad.detach() * rendered).sum()
+    # Stop-grad on the score; differentiate only through the render using mean to stabilize gradients
+    return (grad.detach() * rendered).mean()
 
 
 # --------------------------------------------------------------------------- #

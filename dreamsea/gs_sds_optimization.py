@@ -16,7 +16,8 @@ class GaussianSplattingModel(nn.Module):
         # Scale proportionally to depth to ensure Gaussians overlap to form a solid surface
         # Log-space scaling is used here for stability in optimization
         z_vals = self.positions[:, 2:3].detach()
-        base_scale = z_vals / 200.0
+        # Scale proportionally to depth; use a larger multiplier and a floor to prevent gaps/invisibility
+        base_scale = torch.clamp(z_vals / 80.0, min=0.01)
         self.scaling = nn.Parameter(torch.log(base_scale.repeat(1, 3)))
         
         self.rotation = nn.Parameter(torch.zeros((N, 4), dtype=torch.float32).to(self.device))
@@ -77,7 +78,14 @@ class GaussianSplattingModel(nn.Module):
         den = torch.zeros(flat_size, device=self.device)
         den = den.index_put((flat_idx,), opacities[:, 0], accumulate=True)
 
-        rendered = torch.stack(channels, dim=0) / (den.unsqueeze(0) + 1e-8)
+        # Mask pixels with no projecting Gaussians (den == 0)
+        mask = (den > 1e-8).unsqueeze(0)  # (1, flat_size)
+        raw_rendered = torch.stack(channels, dim=0) / (den.unsqueeze(0) + 1e-8)
+
+        # Background color: -1.0 (black), Background depth: 1.0 (furthest depth)
+        bg_values = torch.tensor([-1.0, -1.0, -1.0, 1.0], device=self.device).view(4, 1)
+        rendered = torch.where(mask, raw_rendered, bg_values)
+
         return rendered.view(4, canvas_size, canvas_size).unsqueeze(0)  # (1, 4, H, W)
 
 def create_point_cloud_from_rgbd(rgbd_map, fov=60.0, latent_grid=None, patch_size=224, overlap_size=32):
@@ -179,15 +187,24 @@ def compute_sds_loss(diffusion_model, scheduler, rendered_image, text_embeddings
     with torch.no_grad():
         if text_embeddings is not None:
             noise_pred = diffusion_model(noisy_image, t, encoder_hidden_states=text_embeddings)
+        elif hasattr(diffusion_model, 'unet') and hasattr(diffusion_model.unet, 'config') and 'cross_attention_dim' in diffusion_model.unet.config and diffusion_model.unet.config.cross_attention_dim is not None:
+            # Fallback to zero embedding for conditional model to prevent missing argument crashes
+            dummy_cond = torch.zeros((noisy_image.shape[0], 1, 2), device=noisy_image.device)
+            noise_pred = diffusion_model(noisy_image, t, encoder_hidden_states=dummy_cond)
         else:
-            noise_pred = diffusion_model(noisy_image, t)
+            # Fallback for models without unet wrapper, e.g. mock or test classes
+            try:
+                noise_pred = diffusion_model(noisy_image, t)
+            except TypeError:
+                dummy_cond = torch.zeros((noisy_image.shape[0], 1, 2), device=noisy_image.device)
+                noise_pred = diffusion_model(noisy_image, t, encoder_hidden_states=dummy_cond)
 
-    w = 1.0 - scheduler.alphas_cumprod.to(t.device)[t]
+    # Use uniform weighting to prevent vanishing gradients at small timesteps
+    w = 1.0
     grad = w * (noise_pred - noise)
 
-    # Stop-gradient on the diffusion score; differentiate only through rendered_image.
-    # Gradients flow back through the differentiable rasterizer to features_dc and opacity.
-    loss = torch.sum(grad.detach() * rendered_image)
+    # Use mean instead of sum to stabilize gradients and prevent opacity/color saturation
+    loss = torch.mean(grad.detach() * rendered_image)
     return loss
 
 

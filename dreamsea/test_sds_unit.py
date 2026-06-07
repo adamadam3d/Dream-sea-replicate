@@ -136,23 +136,24 @@ class TestSDSComponents(unittest.TestCase):
         loss.backward()
         self.assertIsNotNone(rendered.grad)
 
-    def test_conditional_cfg_fallback_bug(self):
-        """Verifies that calling conditional model without cond fails when CFG is disabled.
+    def test_conditional_cfg_fallback_success(self):
+        """Verifies that calling the conditional model without cond or guidance succeeds (no TypeError).
 
-        This test serves to document and guard against the crash described in Consideration Loop 5.
+        This ensures the fallback zero-embedding logic works correctly.
         """
         rendered = torch.randn((1, 4, 64, 64), device=self.device, requires_grad=True)
         
-        # With cond=None or guidance=0.0, it should fallback to calling the model directly.
-        # This will fail with a TypeError if the model is ConditionalDDPM (missing encoder_hidden_states).
-        with self.assertRaises(TypeError):
-            compute_sds_loss_v2(
-                self.cond_model,
-                self.scheduler,
-                rendered,
-                cond=None,
-                guidance=0.0
-            )
+        # This should complete without throwing a TypeError
+        loss = compute_sds_loss_v2(
+            self.cond_model,
+            self.scheduler,
+            rendered,
+            cond=None,
+            guidance=0.0
+        )
+        self.assertEqual(loss.shape, ())
+        loss.backward()
+        self.assertIsNotNone(rendered.grad)
 
 if __name__ == '__main__':
     unittest.main()
