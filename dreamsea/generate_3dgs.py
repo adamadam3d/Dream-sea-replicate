@@ -23,7 +23,7 @@ DEFAULT_LATENT_STATS = {
 def generate_3dgs(cond_ckpt, uncond_ckpt, grid_size=3, roughness=0.5,
                   output_dir="outputs", sds_iterations=500, sds_guidance=2.0,
                   latent_stats_path=None, use_conditional_stitching=False,
-                  rasterizer="gsplat",
+                  rasterizer="gsplat", save_init_ply=False,
                   device='cuda' if torch.cuda.is_available() else 'cpu'):
     """
     Full pipeline to generate a 3DGS scene from trained checkpoints.
@@ -136,6 +136,18 @@ def generate_3dgs(cond_ckpt, uncond_ckpt, grid_size=3, roughness=0.5,
     gs_model = gs_opt.GaussianSplattingModel(positions, colors, point_cloud_conds=conds, device=device)
     print("3DGS model initialized.")
 
+    # Save initial PLY before SDS optimization if requested
+    if save_init_ply:
+        init_pt_path = os.path.join(output_dir, f"{run_name}_init.pt")
+        init_save_dict = gs_model.state_dict()
+        init_save_dict['positions'] = gs_model.positions.cpu()
+        torch.save(init_save_dict, init_pt_path)
+        
+        init_ply_path = os.path.join(output_dir, f"{run_name}_init.ply")
+        from dreamsea.export_ply import export_to_ply
+        export_to_ply(init_pt_path, init_ply_path)
+        print(f"Saved initial pre-SDS model PLY to: {init_ply_path}")
+
     # 5. SDS Optimization
     if sds_iterations > 0:
         print(f"\n--- 5. Optimizing 3DGS via SDS ({sds_iterations} iterations, "
@@ -202,6 +214,8 @@ if __name__ == "__main__":
                              "rasterizer (default; requires `pip install gsplat` and a CUDA device). "
                              "'scatter' = simplified single-view top-down fallback (color/opacity only, "
                              "no extra deps).")
+    parser.add_argument("--save_init_ply", action="store_true",
+                        help="Save the initial point cloud/3DGS model as a .ply file before performing SDS optimization.")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Compute device.")
 
     args = parser.parse_args()
@@ -217,5 +231,6 @@ if __name__ == "__main__":
         latent_stats_path=args.latent_stats_path,
         use_conditional_stitching=args.use_conditional_stitching,
         rasterizer=args.rasterizer,
+        save_init_ply=args.save_init_ply,
         device=args.device
     )
