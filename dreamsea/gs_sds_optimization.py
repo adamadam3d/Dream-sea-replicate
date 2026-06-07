@@ -129,13 +129,13 @@ def create_point_cloud_from_rgbd(rgbd_map, fov=60.0, latent_grid=None, patch_siz
         gx = x / stride
         
         # Clamp to bounds to prevent out-of-index
-        gy = np.clip(gy, 0.0, N_y - 1.0 - 1e-5)
-        gx = np.clip(gx, 0.0, N_x - 1.0 - 1e-5)
+        gy = np.clip(gy, 0.0, max(N_y - 1.0 - 1e-5, 0.0))
+        gx = np.clip(gx, 0.0, max(N_x - 1.0 - 1e-5, 0.0))
         
         gy0 = gy.astype(np.int32)
-        gy1 = gy0 + 1
+        gy1 = np.minimum(gy0 + 1, N_y - 1)
         gx0 = gx.astype(np.int32)
-        gx1 = gx0 + 1
+        gx1 = np.minimum(gx0 + 1, N_x - 1)
         
         wy = gy - gy0
         wx = gx - gx0
