@@ -29,6 +29,7 @@ def generate_3dgs(cond_ckpt, uncond_ckpt, grid_size=3, roughness=0.5,
     Full pipeline to generate a 3DGS scene from trained checkpoints.
     """
     os.makedirs(output_dir, exist_ok=True)
+    run_name = os.path.basename(os.path.normpath(output_dir))
 
     # The unconditional model is only used for (a) seam inpainting when NOT using
     # conditional stitching, and (b) SDS optimization. Skip requiring/loading it
@@ -103,13 +104,13 @@ def generate_3dgs(cond_ckpt, uncond_ckpt, grid_size=3, roughness=0.5,
     )
     
     # Save the global RGBD map for inspection
-    map_path = os.path.join(output_dir, "global_rgbd_map.pt")
+    map_path = os.path.join(output_dir, f"{run_name}_rgbd_map.pt")
     torch.save(torch.from_numpy(global_map), map_path)
     print(f"Global RGBD Map saved to: {map_path}")
 
     # Save the global RGB map as a PNG image
     from PIL import Image
-    rgb_map_path = os.path.join(output_dir, "global_rgb_map.png")
+    rgb_map_path = os.path.join(output_dir, f"{run_name}_rgb_map.png")
     rgb_map = global_map[:3, :, :] # Extract RGB channels
     rgb_img_np = (rgb_map + 1.0) / 2.0 # Normalize from [-1, 1] to [0, 1]
     rgb_img_np = np.clip(rgb_img_np, 0.0, 1.0)
@@ -163,7 +164,7 @@ def generate_3dgs(cond_ckpt, uncond_ckpt, grid_size=3, roughness=0.5,
 
     # 6. Save Results
     # We save a dictionary that includes positions so the .pt can be converted to .ply
-    final_path = os.path.join(output_dir, "final_gs_model.pt")
+    final_path = os.path.join(output_dir, f"{run_name}.pt")
     save_dict = gs_model.state_dict()
     save_dict['positions'] = gs_model.positions.cpu() # Add positions to the save file
     
@@ -174,7 +175,7 @@ def generate_3dgs(cond_ckpt, uncond_ckpt, grid_size=3, roughness=0.5,
     # 7. Auto-export to PLY
     print("\n--- 7. Exporting to PLY ---")
     from dreamsea.export_ply import export_to_ply
-    ply_path = os.path.join(output_dir, "final_gs_model.ply")
+    ply_path = os.path.join(output_dir, f"{run_name}.ply")
     export_to_ply(final_path, ply_path)
     print(f"Auto-exported PLY for visualization to: {ply_path}")
 
