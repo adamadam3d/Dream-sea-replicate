@@ -3,7 +3,7 @@ import torch.nn as nn
 import numpy as np
 
 class GaussianSplattingModel(nn.Module):
-    def __init__(self, point_cloud_positions, point_cloud_colors, point_cloud_conds=None, device='cuda' if torch.cuda.is_available() else 'cpu'):
+    def __init__(self, point_cloud_positions, point_cloud_colors, point_cloud_conds=None, upscale_factor=1.0, device='cuda' if torch.cuda.is_available() else 'cpu'):
         super().__init__()
         self.device = device
         # Freeze 3D positions to prevent memory overflow
@@ -17,7 +17,8 @@ class GaussianSplattingModel(nn.Module):
         # Log-space scaling is used here for stability in optimization
         z_vals = self.positions[:, 2:3].detach()
         # Scale proportionally to depth; use a larger multiplier and a floor to prevent gaps/invisibility
-        base_scale = torch.clamp(z_vals / 80.0, min=0.01)
+        # Adjust base scale size by upscale_factor to match the increased point density
+        base_scale = torch.clamp(z_vals / (80.0 * upscale_factor), min=0.01 / upscale_factor)
         self.scaling = nn.Parameter(torch.log(base_scale.repeat(1, 3)))
         
         self.rotation = nn.Parameter(torch.zeros((N, 4), dtype=torch.float32).to(self.device))

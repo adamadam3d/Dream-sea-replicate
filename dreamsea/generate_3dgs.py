@@ -23,7 +23,7 @@ DEFAULT_LATENT_STATS = {
 def generate_3dgs(cond_ckpt, uncond_ckpt, grid_size=3, roughness=0.5,
                   output_dir="outputs", sds_iterations=500, sds_guidance=2.0,
                   latent_stats_path=None, use_conditional_stitching=False,
-                  rasterizer="gsplat", save_init_ply=False,
+                  rasterizer="gsplat", save_init_ply=False, upscale_factor=1.0,
                   device='cuda' if torch.cuda.is_available() else 'cpu'):
     """
     Full pipeline to generate a 3DGS scene from trained checkpoints.
@@ -108,6 +108,24 @@ def generate_3dgs(cond_ckpt, uncond_ckpt, grid_size=3, roughness=0.5,
     torch.save(torch.from_numpy(global_map), map_path)
     print(f"Global RGBD Map saved to: {map_path}")
 
+    # Upscale stitched RGBD map if requested to increase 3DGS resolution
+    if upscale_factor > 1.0:
+        global_tensor = torch.from_numpy(global_map).unsqueeze(0).to(device)
+        new_H = int(global_map.shape[1] * upscale_factor)
+        new_W = int(global_map.shape[2] * upscale_factor)
+        
+        rgb_upscaled = torch.nn.functional.interpolate(
+            global_tensor[:, :3], size=(new_H, new_W), mode='bilinear', align_corners=False
+        )
+        depth_upscaled = torch.nn.functional.interpolate(
+            global_tensor[:, 3:4], size=(new_H, new_W), mode='bilinear', align_corners=False
+        )
+        
+        global_tensor_upscaled = torch.cat([rgb_upscaled, depth_upscaled], dim=1)
+        global_map = global_tensor_upscaled.squeeze(0).cpu().numpy()
+        print(f"Upscaled global RGBD map from {global_tensor.shape[2]}x{global_tensor.shape[3]} "
+              f"to {new_H}x{new_W} (factor: {upscale_factor})")
+
     # Save the global RGB map as a PNG image
     from PIL import Image
     rgb_map_path = os.path.join(output_dir, f"{run_name}_rgb_map.png")
@@ -124,8 +142,8 @@ def generate_3dgs(cond_ckpt, uncond_ckpt, grid_size=3, roughness=0.5,
     positions, colors, conds = gs_opt.create_point_cloud_from_rgbd(
         global_map, 
         latent_grid=latent_grid, 
-        patch_size=224, 
-        overlap_size=32
+        patch_size=int(224 * upscale_factor), 
+        overlap_size=int(32 * upscale_factor)
     )
     print(f"Extracted {positions.shape[0]} points from map.")
 
@@ -133,7 +151,7 @@ def generate_3dgs(cond_ckpt, uncond_ckpt, grid_size=3, roughness=0.5,
         print("Error: No valid points found in RGBD map. Aborting.")
         return
 
-    gs_model = gs_opt.GaussianSplattingModel(positions, colors, point_cloud_conds=conds, device=device)
+    gs_model = gs_opt.GaussianSplattingModel(positions, colors, point_cloud_conds=conds, upscale_factor=upscale_factor, device=device)
     print("3DGS model initialized.")
 
     # Save initial PLY before SDS optimization if requested
@@ -216,6 +234,8 @@ if __name__ == "__main__":
                              "no extra deps).")
     parser.add_argument("-p", "--save_init_ply", action="store_true",
                         help="Save the initial point cloud/3DGS model as a .ply file before performing SDS optimization.")
+    parser.add_argument("-f", "--upscale_factor", type=float, default=1.0,
+                        help="Upscale factor for the stitched RGBD map before unprojecting. Values > 1.0 increase point density/3DGS resolution.")
     parser.add_argument("-d", "--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Compute device.")
 
     args = parser.parse_args()
@@ -232,5 +252,6 @@ if __name__ == "__main__":
         use_conditional_stitching=args.use_conditional_stitching,
         rasterizer=args.rasterizer,
         save_init_ply=args.save_init_ply,
+        upscale_factor=args.upscale_factor,
         device=args.device
     )
