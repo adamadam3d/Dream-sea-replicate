@@ -126,16 +126,37 @@ def generate_3dgs(cond_ckpt, uncond_ckpt, grid_size=3, roughness=0.5,
         print(f"Upscaled global RGBD map from {global_tensor.shape[2]}x{global_tensor.shape[3]} "
               f"to {new_H}x{new_W} (factor: {upscale_factor})")
 
-    # Save the global RGB map as a PNG image
+    # Save the global RGB and Depth map collage as a PNG image
     from PIL import Image
     rgb_map_path = os.path.join(output_dir, f"{run_name}_rgb_map.png")
+    
+    # 1. RGB Image
     rgb_map = global_map[:3, :, :] # Extract RGB channels
     rgb_img_np = (rgb_map + 1.0) / 2.0 # Normalize from [-1, 1] to [0, 1]
     rgb_img_np = np.clip(rgb_img_np, 0.0, 1.0)
     rgb_img_np = (rgb_img_np * 255.0).astype(np.uint8) # Convert to uint8
-    rgb_img_np = np.transpose(rgb_img_np, (1, 2, 0)) # CHW -> HWC for PIL
-    Image.fromarray(rgb_img_np).save(rgb_map_path)
-    print(f"Global RGB Map image saved to: {rgb_map_path}")
+    rgb_img_np = np.transpose(rgb_img_np, (1, 2, 0)) # CHW -> HWC
+    rgb_image = Image.fromarray(rgb_img_np)
+    
+    # 2. Depth Image (Heatmap: Red-Blue)
+    depth_map = global_map[3, :, :] # Extract Depth channel (H, W)
+    depth_img_np = (depth_map + 1.0) / 2.0 # Normalize from [-1, 1] to [0, 1]
+    depth_img_np = np.clip(depth_img_np, 0.0, 1.0)
+    
+    # Red-Blue colormap
+    r = (depth_img_np * 255.0).astype(np.uint8)
+    g = np.zeros_like(r)
+    b = ((1.0 - depth_img_np) * 255.0).astype(np.uint8)
+    depth_colored_np = np.stack([r, g, b], axis=-1)
+    depth_image = Image.fromarray(depth_colored_np, mode='RGB')
+    
+    # 3. Create Collage
+    W, H = rgb_image.size
+    collage = Image.new('RGB', (W, H * 2))
+    collage.paste(rgb_image, (0, 0))
+    collage.paste(depth_image, (0, H))
+    collage.save(rgb_map_path)
+    print(f"Global RGB and Depth map collage saved to: {rgb_map_path}")
 
     # 4. Initialize 3D Gaussian Splatting
     print("\n--- 4. Initializing 3D Gaussian Splatting ---")
