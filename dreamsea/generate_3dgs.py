@@ -193,30 +193,30 @@ def generate_3dgs(cond_ckpt, uncond_ckpt, grid_size=3, roughness=0.5,
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate a 3DGS scene from trained DreamSea checkpoints.")
-    parser.add_argument("--cond_ckpt", type=str, required=True, help="Path to the conditional DDPM checkpoint.")
-    parser.add_argument("--uncond_ckpt", type=str, default=None,
+    parser.add_argument("-c", "--cond_ckpt", type=str, required=True, help="Path to the conditional DDPM checkpoint.")
+    parser.add_argument("-u", "--uncond_ckpt", type=str, default=None,
                         help="Path to the unconditional DDPM checkpoint. Only required when NOT "
                              "using --use_conditional_stitching, or when --sds_iterations > 0. "
                              "Do not pass the conditional checkpoint here.")
-    parser.add_argument("--grid_size", type=int, default=3, help="Latent grid size (must be 2^n + 1, e.g., 3, 5, 9, or 1 for a single patch).")
-    parser.add_argument("--roughness", type=float, default=0.5, help="Fractal roughness.")
-    parser.add_argument("--sds_iterations", type=int, default=100, help="Number of SDS optimization steps.")
-    parser.add_argument("--sds_guidance", type=float, default=2.0, help="Classifier-Free Guidance (CFG) scale for conditional SDS.")
-    parser.add_argument("--output_dir", type=str, default="outputs/3dgs_gen", help="Directory to save output files.")
-    parser.add_argument("--latent_stats_path", type=str, default=None,
+    parser.add_argument("-g", "--grid_size", type=int, default=3, help="Latent grid size (must be 2^n + 1, e.g., 3, 5, 9, or 1 for a single patch).")
+    parser.add_argument("-r", "--roughness", type=float, default=0.5, help="Fractal roughness.")
+    parser.add_argument("-i", "--sds_iterations", type=int, default=100, help="Number of SDS optimization steps.")
+    parser.add_argument("-s", "--sds_guidance", type=float, default=2.0, help="Classifier-Free Guidance (CFG) scale for conditional SDS.")
+    parser.add_argument("-o", "--output_dir", type=str, default="outputs/3dgs_gen", help="Directory to save output files.")
+    parser.add_argument("-l", "--latent_stats_path", type=str, default=None,
                         help="Path to latent_stats.json from preprocessing. Rescales fractal "
                              "grid into the training PCA range for in-distribution generation. "
                              "If omitted, the built-in DEFAULT_LATENT_STATS are used.")
-    parser.add_argument("--use_conditional_stitching", action="store_true",
+    parser.add_argument("-t", "--use_conditional_stitching", action="store_true",
                         help="Use the conditional DDPM for inpainting seams (averages latent vectors of adjacent patches).")
-    parser.add_argument("--rasterizer", type=str, choices=["scatter", "gsplat"], default="gsplat",
+    parser.add_argument("-z", "--rasterizer", type=str, choices=["scatter", "gsplat"], default="gsplat",
                         help="SDS renderer. 'gsplat' = faithful multi-view differentiable Gaussian "
                              "rasterizer (default; requires `pip install gsplat` and a CUDA device). "
                              "'scatter' = simplified single-view top-down fallback (color/opacity only, "
                              "no extra deps).")
-    parser.add_argument("--save_init_ply", action="store_true",
+    parser.add_argument("-p", "--save_init_ply", action="store_true",
                         help="Save the initial point cloud/3DGS model as a .ply file before performing SDS optimization.")
-    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Compute device.")
+    parser.add_argument("-d", "--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Compute device.")
 
     args = parser.parse_args()
 
