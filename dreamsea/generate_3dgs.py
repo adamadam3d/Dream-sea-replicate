@@ -21,7 +21,8 @@ DEFAULT_LATENT_STATS = {
 }
 
 def generate_3dgs(cond_ckpt, uncond_ckpt, grid_size=3, roughness=0.5,
-                  output_dir="outputs", sds_iterations=500, sds_guidance=2.0,
+                  output_dir="outputs", sds_iterations=500, sds_guidance=0.0,
+                  sds_rgbd=False, sds_anchor=1.0,
                   latent_stats_path=None, use_conditional_stitching=False,
                   rasterizer="gsplat", save_init_ply=False, upscale_factor=1.0,
                   device='cuda' if torch.cuda.is_available() else 'cpu'):
@@ -193,14 +194,21 @@ def generate_3dgs(cond_ckpt, uncond_ckpt, grid_size=3, roughness=0.5,
               f"rasterizer={rasterizer}) ---")
         if rasterizer == "gsplat":
             # Faithful multi-view SDS with a real differentiable Gaussian rasterizer.
-            # Using the conditional model with CFG guidance scale on local retrieved condition
+            # Each view frames ~one training-patch footprint so the texture scale
+            # matches the prior; the per-view condition is the latent at the
+            # framed point, which is now coherent with what is in frame.
             from dreamsea.gs_sds_optimization_v2 import optimize_3dgs_sds_multiview
+            patch_px = 224 * upscale_factor
+            frame_fraction = min(patch_px / global_map.shape[2], 1.0)
             optimize_3dgs_sds_multiview(
                 model=gs_model,
                 diffusion_model=generator.cond_model,
                 scheduler=generator.scheduler,
                 iterations=sds_iterations,
                 guidance=sds_guidance,
+                rgb_only=not sds_rgbd,
+                frame_fraction=frame_fraction,
+                anchor_weight=sds_anchor,
             )
         else:
             # Simplified single-view scatter renderer (color/opacity only).
@@ -240,7 +248,21 @@ if __name__ == "__main__":
     parser.add_argument("-g", "--grid_size", type=int, default=3, help="Latent grid size (must be 2^n + 1, e.g., 3, 5, 9, or 1 for a single patch).")
     parser.add_argument("-r", "--roughness", type=float, default=0.5, help="Fractal roughness.")
     parser.add_argument("-i", "--sds_iterations", type=int, default=100, help="Number of SDS optimization steps.")
-    parser.add_argument("-s", "--sds_guidance", type=float, default=2.0, help="Classifier-Free Guidance (CFG) scale for conditional SDS.")
+    parser.add_argument("-s", "--sds_guidance", type=float, default=0.0,
+                        help="Classifier-Free Guidance (CFG) scale for conditional SDS. Default 0 "
+                             "(disabled): the conditional model was trained WITHOUT condition "
+                             "dropout and the PCA latents are zero-mean, so a zero latent is the "
+                             "MEAN condition rather than a null branch — CFG > 0 extrapolates "
+                             "between two conditional predictions and produces saturated artifacts.")
+    parser.add_argument("-q", "--sds_rgbd", action="store_true",
+                        help="Backpropagate the SDS gradient through the depth channel as well. "
+                             "Off by default: the rendered per-view min-max depth does not match "
+                             "the per-image relative depth the prior was trained on, and its "
+                             "gradient corrupts scaling/opacity (depth is still rendered as "
+                             "context for the 4-channel UNet either way).")
+    parser.add_argument("-w", "--sds_anchor", type=float, default=1.0,
+                        help="Weight of the MSE anchor pulling color/opacity/scaling back toward "
+                             "their initialization during SDS. 0 disables the anchor.")
     parser.add_argument("-o", "--output_dir", type=str, default="outputs/3dgs_gen", help="Directory to save output files.")
     parser.add_argument("-l", "--latent_stats_path", type=str, default=None,
                         help="Path to latent_stats.json from preprocessing. Rescales fractal "
@@ -268,6 +290,8 @@ if __name__ == "__main__":
         roughness=args.roughness,
         sds_iterations=args.sds_iterations,
         sds_guidance=args.sds_guidance,
+        sds_rgbd=args.sds_rgbd,
+        sds_anchor=args.sds_anchor,
         output_dir=args.output_dir,
         latent_stats_path=args.latent_stats_path,
         use_conditional_stitching=args.use_conditional_stitching,

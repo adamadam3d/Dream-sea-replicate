@@ -174,9 +174,12 @@ def compute_sds_loss(diffusion_model, scheduler, rendered_image, text_embeddings
     Score Distillation Sampling loss (DreamFusion).
     rendered_image: (1, 4, H, W) — must be a differentiable function of the 3DGS parameters.
     """
+    # Low timestep range: the Gaussians are initialized from a complete RGBD
+    # map, so SDS only refines. High-t scores point toward the dataset mean
+    # image and erase the initialization.
     t = torch.randint(
         int(scheduler.config.num_train_timesteps * 0.02),
-        int(scheduler.config.num_train_timesteps * 0.98),
+        int(scheduler.config.num_train_timesteps * 0.30),
         (1,), device=rendered_image.device
     ).long()
 

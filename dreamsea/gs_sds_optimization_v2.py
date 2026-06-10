@@ -8,7 +8,13 @@ simplified scatter renderer in gs_sds_optimization.py, it:
   - renders RANDOM novel viewpoints each step (within a near-nadir cone, since
     the diffusion prior only ever saw top-down seafloor), which is what lets SDS
     actually refine 3D appearance/consistency;
-  - anneals the diffusion timestep from coarse to fine over training.
+  - frames each view at roughly one training-patch footprint (not the whole
+    scene), so the texture scale the prior sees matches what it was trained on;
+  - restricts the diffusion timestep to a LOW range (refinement). The Gaussians
+    are initialized from a complete stitched RGBD map, so high-t SDS would pull
+    the scene toward the dataset mean and erase the init;
+  - anchors the appearance parameters to their initialization so a mismatched
+    score cannot drift the scene arbitrarily far.
 
 Positions are kept frozen (paper §3.4); scaling, rotation, opacity and colour
 are optimized.
@@ -56,12 +62,17 @@ def look_at(cam_pos, target, up=(0.0, 0.0, 1.0), device='cuda'):
 
 
 def sample_topdown_camera(positions, target=None, fov_deg=60.0, device='cuda',
-                          elev_min=75.0, elev_max=90.0):
+                          elev_min=75.0, elev_max=90.0, frame_extent=None):
     """Sample a camera within a near-nadir cone looking at the target (or terrain centre if None).
 
     elev is measured from horizontal: 90 deg = straight down. Keep elev_min high
     (~60) so views stay close to top-down, matching the diffusion prior. Widening
     this cone pushes the prior out of distribution and reintroduces artifacts.
+
+    frame_extent: world-space extent the view should roughly cover. Pass the
+    extent of ONE training patch so the rendered texture scale matches what the
+    diffusion prior saw. If None, frames the whole scene (out of distribution
+    for multi-patch scenes — the prior then smooths fine detail away).
     """
     if target is None:
         center = positions.mean(0)
@@ -69,6 +80,8 @@ def sample_topdown_camera(positions, target=None, fov_deg=60.0, device='cuda',
         center = torch.as_tensor(target, dtype=torch.float32, device=device)
 
     extent = (positions.max(0).values - positions.min(0).values).norm()
+    if frame_extent is not None:
+        extent = torch.as_tensor(frame_extent, dtype=torch.float32, device=device)
     dist = 0.6 * extent / math.tan(math.radians(fov_deg) / 2.0)
 
     elev = math.radians(np.random.uniform(elev_min, elev_max))
@@ -132,8 +145,13 @@ def render_rgbd(rasterization, model, viewmat, K, H=224, W=224, rgb_only=False):
 # SDS loss                                                                      #
 # --------------------------------------------------------------------------- #
 def compute_sds_loss(diffusion_model, scheduler, rendered,
-                     t_lo=0.02, t_hi=0.98, cond=None, guidance=0.0):
-    """DreamFusion SDS surrogate. `rendered` is (1, C, H, W), differentiable."""
+                     t_lo=0.02, t_hi=0.30, cond=None, guidance=0.0):
+    """DreamFusion SDS surrogate. `rendered` is (1, C, H, W), differentiable.
+
+    The default timestep range is LOW ([0.02, 0.30]) because this stage refines
+    an already-initialized scene. At high t the score points toward the dataset
+    mean image, which overwrites a good initialization instead of sharpening it.
+    """
     T = scheduler.config.num_train_timesteps
     t = torch.randint(int(T * t_lo), max(int(T * t_hi), int(T * t_lo) + 1),
                       (1,), device=rendered.device).long()
@@ -173,13 +191,27 @@ def compute_sds_loss(diffusion_model, scheduler, rendered,
 # --------------------------------------------------------------------------- #
 def optimize_3dgs_sds_multiview(model, diffusion_model, scheduler, iterations=1000,
                                 views_per_iter=4, fov_deg=60.0, H=224, W=224,
-                                elev_min=60.0, cond=None, guidance=0.0, rgb_only=False):
+                                elev_min=60.0, cond=None, guidance=0.0, rgb_only=True,
+                                frame_fraction=None, anchor_weight=1.0):
     """Multi-view SDS with a real Gaussian rasterizer.
 
     cond / guidance: pass the conditional model + its latent (shape (1,1,2)) and
-    guidance>0 to do guided SDS; otherwise plain unconditional SDS.
-    rgb_only: skip the depth channel (more robust — avoids the relative-vs-metric
-    depth domain mismatch; geometry is carried by the frozen-position init).
+    guidance>0 to do guided SDS; otherwise plain unconditional SDS. NB: guided
+    SDS is unreliable here — the conditional UNet was trained WITHOUT condition
+    dropout and the PCA latents have mean ~0, so a zero latent is the MEAN
+    condition, not a null branch. CFG then extrapolates between two conditional
+    predictions and produces saturated artifacts. Leave guidance at 0 unless the
+    model is retrained with condition dropout.
+    rgb_only: detach the depth channel before the SDS loss (default). The
+    rendered per-view min-max depth does not match the per-image relative depth
+    the prior was trained on, and its gradient wrecks scaling/opacity; the
+    depth is still rendered as context for the 4-channel UNet, and geometry is
+    carried by the frozen-position init.
+    frame_fraction: fraction of the scene extent each rendered view should
+    cover. Pass patch_size / map_size so one view ~ one training patch; None
+    frames the whole scene (only in-distribution for single-patch scenes).
+    anchor_weight: weight of an MSE anchor pulling color/opacity/scaling back
+    toward their initialization, bounding how far SDS can drift the scene.
     """
     try:
         from gsplat import rasterization
@@ -205,13 +237,28 @@ def optimize_3dgs_sds_multiview(model, diffusion_model, scheduler, iterations=10
 
     K = intrinsics(fov_deg, W, H, device)
 
+    # World-space extent one rendered view should frame (patch footprint).
+    frame_extent = None
+    if frame_fraction is not None:
+        scene_extent = (model.positions.max(0).values - model.positions.min(0).values).norm()
+        frame_extent = (scene_extent * min(frame_fraction, 1.0)).item()
+
+    # Snapshot the initialization (in activated space) for the anchor loss.
+    init_colors = torch.tanh(model.features_dc).detach().clone()
+    init_opacity = torch.sigmoid(model.opacity).detach().clone()
+    init_scaling = model.scaling.detach().clone()
+
     print(f"Starting multi-view SDS ({iterations} iters, {views_per_iter} views/iter, "
-          f"rasterizer=gsplat, rgb_only={rgb_only}, guidance={guidance})...")
+          f"rasterizer=gsplat, rgb_only={rgb_only}, guidance={guidance}, "
+          f"frame_fraction={frame_fraction}, anchor_weight={anchor_weight})...")
     for i in range(iterations):
-        # Anneal the upper timestep limit from coarse (0.98) to fine (0.40) using a cosine schedule
+        # Anneal the upper timestep limit from 0.30 down to 0.10 (cosine). The
+        # whole range stays LOW: the scene is initialized from a complete RGBD
+        # map, so SDS only refines — high-t scores would pull the appearance
+        # toward the dataset mean and erase the init.
         frac = i / max(iterations - 1, 1)
         cos_val = math.cos(math.pi * frac)  # +1 down to -1
-        t_hi = 0.40 + 0.58 * (cos_val + 1.0) / 2.0
+        t_hi = 0.10 + 0.20 * (cos_val + 1.0) / 2.0
 
         loss = 0.0
         for _ in range(views_per_iter):
@@ -228,13 +275,30 @@ def optimize_3dgs_sds_multiview(model, diffusion_model, scheduler, iterations=10
             elif cond is not None:
                 local_cond = cond
 
-            vm = sample_topdown_camera(model.positions, target=target_pos, fov_deg=fov_deg, device=device, elev_min=elev_min)
-            rgbd = render_rgbd(rasterization, model, vm, K, H, W, rgb_only=rgb_only)
+            vm = sample_topdown_camera(model.positions, target=target_pos, fov_deg=fov_deg,
+                                       device=device, elev_min=elev_min, frame_extent=frame_extent)
+            rgbd = render_rgbd(rasterization, model, vm, K, H, W)
+            if rgb_only:
+                # The 4-channel UNet still needs a depth channel as context, but
+                # detaching it blocks the mismatched depth gradient (per-view
+                # min-max depth vs. the prior's per-image relative depth) from
+                # corrupting scaling/opacity.
+                rgbd = torch.cat([rgbd[:3], rgbd[3:].detach()], dim=0)
             loss = loss + compute_sds_loss(
                 diffusion_model, scheduler, rgbd.unsqueeze(0),
                 t_hi=t_hi, cond=local_cond, guidance=guidance,
             )
         loss = loss / views_per_iter
+
+        # Anchor to the initialization so a mismatched score can't drift the
+        # scene arbitrarily far from the (already correct) unprojected map.
+        if anchor_weight > 0.0:
+            anchor = (
+                torch.nn.functional.mse_loss(torch.tanh(model.features_dc), init_colors)
+                + torch.nn.functional.mse_loss(torch.sigmoid(model.opacity), init_opacity)
+                + torch.nn.functional.mse_loss(model.scaling, init_scaling)
+            )
+            loss = loss + anchor_weight * anchor
 
         optimizer.zero_grad()
         loss.backward()
