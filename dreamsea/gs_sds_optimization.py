@@ -3,7 +3,8 @@ import torch.nn as nn
 import numpy as np
 
 class GaussianSplattingModel(nn.Module):
-    def __init__(self, point_cloud_positions, point_cloud_colors, point_cloud_conds=None, upscale_factor=1.0, device='cuda' if torch.cuda.is_available() else 'cpu'):
+    def __init__(self, point_cloud_positions, point_cloud_colors, point_cloud_conds=None, upscale_factor=1.0,
+                 point_spacing=None, splat_scale=0.75, device='cuda' if torch.cuda.is_available() else 'cpu'):
         super().__init__()
         self.device = device
         # Freeze 3D positions to prevent memory overflow
@@ -13,12 +14,21 @@ class GaussianSplattingModel(nn.Module):
 
         # Optimize appearance only (covariance, opacity, radiance)
         # Covariance represented via scaling and rotation (quaternions)
-        # Scale proportionally to depth to ensure Gaussians overlap to form a solid surface
         # Log-space scaling is used here for stability in optimization
         z_vals = self.positions[:, 2:3].detach()
-        # Scale proportionally to depth; use a larger multiplier and a floor to prevent gaps/invisibility
-        # Adjust base scale size by upscale_factor to match the increased point density
-        base_scale = torch.clamp(z_vals / (80.0 * upscale_factor), min=0.01 / upscale_factor)
+        if point_spacing is not None:
+            # σ tied to the actual inter-point spacing of the unprojected grid, so
+            # sharpness is independent of map resolution. ~0.75x spacing overlaps
+            # enough to stay hole-free without acting as a low-pass filter. (The
+            # legacy z/80 heuristic below made σ grow with map width — ~6.6x the
+            # spacing for a 3x3 grid — blurring away the RGBD map's texture.)
+            spacing = torch.as_tensor(np.asarray(point_spacing), dtype=torch.float32).view(-1, 1).to(self.device)
+            base_scale = torch.clamp(spacing * splat_scale, min=1e-6)
+        else:
+            # Legacy depth-proportional heuristic for callers that don't know the
+            # unprojection focal length; resolution-dependent and blurry for
+            # multi-patch maps.
+            base_scale = torch.clamp(z_vals / (80.0 * upscale_factor), min=0.01 / upscale_factor)
         self.scaling = nn.Parameter(torch.log(base_scale.repeat(1, 3)))
         
         self.rotation = nn.Parameter(torch.zeros((N, 4), dtype=torch.float32).to(self.device))

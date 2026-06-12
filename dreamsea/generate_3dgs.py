@@ -25,6 +25,7 @@ def generate_3dgs(cond_ckpt, uncond_ckpt, grid_size=3, roughness=0.5,
                   sds_rgbd=False, sds_anchor=1.0,
                   latent_stats_path=None, use_conditional_stitching=False,
                   rasterizer="gsplat", save_init_ply=False, upscale_factor=1.0,
+                  splat_scale=0.75,
                   device='cuda' if torch.cuda.is_available() else 'cpu'):
     """
     Full pipeline to generate a 3DGS scene from trained checkpoints.
@@ -173,7 +174,16 @@ def generate_3dgs(cond_ckpt, uncond_ckpt, grid_size=3, roughness=0.5,
         print("Error: No valid points found in RGBD map. Aborting.")
         return
 
-    gs_model = gs_opt.GaussianSplattingModel(positions, colors, point_cloud_conds=conds, upscale_factor=upscale_factor, device=device)
+    # Per-point spacing of the unprojected pixel grid (z / focal, with the same
+    # fov=60 used inside create_point_cloud_from_rgbd) so splat sizes match the
+    # map's actual resolution instead of growing with map width.
+    focal = 0.5 * global_map.shape[2] / np.tan(np.radians(60.0) / 2.0)
+    point_spacing = positions[:, 2] / focal
+
+    gs_model = gs_opt.GaussianSplattingModel(positions, colors, point_cloud_conds=conds,
+                                             upscale_factor=upscale_factor,
+                                             point_spacing=point_spacing,
+                                             splat_scale=splat_scale, device=device)
     print("3DGS model initialized.")
 
     # Save initial PLY before SDS optimization if requested
@@ -279,6 +289,11 @@ if __name__ == "__main__":
                         help="Save the initial point cloud/3DGS model as a .ply file before performing SDS optimization.")
     parser.add_argument("-f", "--upscale_factor", type=float, default=1.0,
                         help="Upscale factor for the stitched RGBD map before unprojecting. Values > 1.0 increase point density/3DGS resolution.")
+    parser.add_argument("-k", "--splat_scale", type=float, default=0.75,
+                        help="Initial Gaussian size as a multiple of the inter-point spacing. "
+                             "Lower = sharper texture (risk of pinholes on steep slopes), "
+                             "higher = smoother/safer coverage. 0.75 keeps the surface "
+                             "hole-free without blurring the RGBD map.")
     parser.add_argument("-d", "--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Compute device.")
 
     args = parser.parse_args()
@@ -298,5 +313,6 @@ if __name__ == "__main__":
         rasterizer=args.rasterizer,
         save_init_ply=args.save_init_ply,
         upscale_factor=args.upscale_factor,
+        splat_scale=args.splat_scale,
         device=args.device
     )

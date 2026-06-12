@@ -167,6 +167,13 @@ def compute_sds_loss(diffusion_model, scheduler, rendered,
             eps_c = diffusion_model(x_t, t, encoder_hidden_states=cond)
             eps_u = diffusion_model(x_t, t, encoder_hidden_states=torch.zeros_like(cond))
             eps = eps_u + guidance * (eps_c - eps_u)
+        elif cond is not None:
+            # Plain conditional SDS: score with the actual local condition.
+            # (Previously this fell through to the zero-condition branch below, so
+            # with the default guidance=0 every view was scored against the
+            # dataset-MEAN latent — SDS then pulled all regions toward the mean
+            # appearance instead of refining toward the local one.)
+            eps = diffusion_model(x_t, t, encoder_hidden_states=cond)
         else:
             # Check if conditional model. If so, pass dummy zero condition to prevent signature crash
             if hasattr(diffusion_model, 'unet') and hasattr(diffusion_model.unet, 'config') and 'cross_attention_dim' in diffusion_model.unet.config and diffusion_model.unet.config.cross_attention_dim is not None:
@@ -195,9 +202,9 @@ def optimize_3dgs_sds_multiview(model, diffusion_model, scheduler, iterations=10
                                 frame_fraction=None, anchor_weight=1.0):
     """Multi-view SDS with a real Gaussian rasterizer.
 
-    cond / guidance: pass the conditional model + its latent (shape (1,1,2)) and
-    guidance>0 to do guided SDS; otherwise plain unconditional SDS. NB: guided
-    SDS is unreliable here — the conditional UNet was trained WITHOUT condition
+    cond / guidance: with the conditional model, the per-view local latent is
+    always used to score the render; guidance>0 additionally applies CFG against
+    a zero-latent branch. NB: guided SDS is unreliable here — the conditional UNet was trained WITHOUT condition
     dropout and the PCA latents have mean ~0, so a zero latent is the MEAN
     condition, not a null branch. CFG then extrapolates between two conditional
     predictions and produces saturated artifacts. Leave guidance at 0 unless the
