@@ -25,7 +25,11 @@ def generate_unconditional(model_path, output_dir, num_inference_steps=1000, dev
     
     if model_path:
         checkpoint = torch.load(model_path, map_location=device, weights_only=False)
-        if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+        # Prefer EMA weights when present — cleaner samples than raw weights
+        if isinstance(checkpoint, dict) and 'ema_model_state_dict' in checkpoint:
+            state_dict = checkpoint['ema_model_state_dict']
+            print("Using EMA weights from checkpoint.")
+        elif isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
             state_dict = checkpoint['model_state_dict']
         else:
             state_dict = checkpoint

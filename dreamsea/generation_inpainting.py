@@ -14,8 +14,13 @@ def _load_ddpm_checkpoint(model, ckpt_path, device):
     a clear, actionable error instead of running on a half-initialized model.
     """
     checkpoint = torch.load(ckpt_path, map_location=device, weights_only=False)
-    # Support both new dict-based and old raw state_dict checkpoint formats
-    if isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+    # Support both new dict-based and old raw state_dict checkpoint formats.
+    # Prefer EMA weights when the checkpoint carries them — the averaged copy
+    # produces noticeably cleaner samples than the raw training weights.
+    if isinstance(checkpoint, dict) and 'ema_model_state_dict' in checkpoint:
+        state_dict = checkpoint['ema_model_state_dict']
+        print(f"Using EMA weights from '{ckpt_path}'.")
+    elif isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
         state_dict = checkpoint['model_state_dict']
     else:
         state_dict = checkpoint

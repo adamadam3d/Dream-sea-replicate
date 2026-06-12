@@ -11,6 +11,7 @@ import torch.nn.functional as F
 import numpy as np
 from PIL import Image
 from diffusers import DDPMScheduler
+from diffusers.training_utils import EMAModel
 from torch.utils.data import DataLoader, Dataset
 from accelerate import Accelerator
 from dreamsea.models import ConditionalDDPM, UnconditionalDDPM
@@ -146,6 +147,25 @@ def generate_samples_during_training(model, epoch, output_dir, device, model_typ
     
     return str(rgb_path), str(depth_path)
 
+def build_checkpoint(epoch, unwrapped_model, optimizer, ema_model=None):
+    """Assemble a checkpoint dict with raw weights, optimizer state and, when EMA
+    is enabled, a named EMA state dict that inference loaders can use directly."""
+    ckpt = {
+        'epoch': epoch,
+        'model_state_dict': unwrapped_model.state_dict(),
+        'optimizer_state_dict': optimizer.state_dict(),
+    }
+    if ema_model is not None:
+        # EMAModel only tracks parameters, in parameters() order. Overlay the
+        # shadow params on a copy of the full state dict so buffers stay intact
+        # and every key keeps its module-qualified name.
+        ema_state = {k: v.detach().cpu().clone() for k, v in unwrapped_model.state_dict().items()}
+        for (name, _), shadow in zip(unwrapped_model.named_parameters(), ema_model.shadow_params):
+            ema_state[name] = shadow.detach().cpu().clone()
+        ckpt['ema_model_state_dict'] = ema_state
+        ckpt['ema_optimization_step'] = ema_model.optimization_step
+    return ckpt
+
 class PreprocessedDataset(Dataset):
     """Loads preprocessed RGBD tensors and condition vectors from disk."""
     def __init__(self, data_dir, conditional=True):
@@ -194,7 +214,7 @@ def train_ddpm(data_dir, model_type='conditional', epochs=500, batch_size=16,
                checkpoint_dir='checkpoints', save_every=50, resume_from=None, 
                device='cuda' if torch.cuda.is_available() else 'cpu', multi_gpu=False,
                learning_rate=1e-4, gradient_accumulation_steps=1, mixed_precision='fp16',
-               gradient_checkpointing=False, ntfy_topic=None):
+               gradient_checkpointing=False, ntfy_topic=None, ema_decay=0.9999):
     """
     Training loop for DDPM models using preprocessed data.
     """
@@ -264,12 +284,34 @@ def train_ddpm(data_dir, model_type='conditional', epochs=500, batch_size=16,
         except Exception as e:
             accelerator.print(f"Warning: Could not restore optimizer state: {e}. Using fresh optimizer.")
 
+    # EMA of model weights — sampling/inference uses this averaged copy, which
+    # gives markedly cleaner generations than the raw training weights.
+    use_ema = ema_decay > 0
+    ema_model = None
+    if use_ema:
+        unwrapped = accelerator.unwrap_model(model)
+        resume_ema_state = None
+        if resume_from and os.path.exists(resume_from) and isinstance(checkpoint, dict):
+            resume_ema_state = checkpoint.get('ema_model_state_dict')
+        if resume_ema_state is not None:
+            # Seed the EMA shadow params from the checkpoint by temporarily loading
+            # the EMA weights into the model (EMAModel clones params on construction).
+            raw_state = {k: v.clone() for k, v in unwrapped.state_dict().items()}
+            unwrapped.load_state_dict(resume_ema_state)
+            ema_model = EMAModel(unwrapped.parameters(), decay=ema_decay, use_ema_warmup=True)
+            unwrapped.load_state_dict(raw_state)
+            ema_model.optimization_step = checkpoint.get('ema_optimization_step', 0)
+            accelerator.print(f"Restored EMA weights from checkpoint (EMA step {ema_model.optimization_step}).")
+        else:
+            ema_model = EMAModel(unwrapped.parameters(), decay=ema_decay, use_ema_warmup=True)
+
     model.train()
     accelerator.print(f"Starting training for {model_type} DDPM...")
     accelerator.print(f"Dataset size: {len(dataset)} images")
     accelerator.print(f"Batch size per device: {batch_size}, Epochs: {epochs}")
     accelerator.print(f"Gradient accumulation steps: {gradient_accumulation_steps}")
     accelerator.print(f"Mixed precision: {accelerator.mixed_precision}")
+    accelerator.print(f"EMA: {f'enabled (decay={ema_decay}, warmup on)' if use_ema else 'disabled'}")
     accelerator.print(f"Checkpoints will be saved to '{checkpoint_dir}' every {save_every} epochs.")
 
     if accelerator.is_main_process:
@@ -394,7 +436,12 @@ def train_ddpm(data_dir, model_type='conditional', epochs=500, batch_size=16,
                             skipped_steps_epoch += 1
                     optimizer.step()
                     optimizer.zero_grad()
-                    
+
+                    # Update the EMA copy after each real optimizer step (not on
+                    # intermediate gradient-accumulation micro-steps)
+                    if use_ema and accelerator.sync_gradients:
+                        ema_model.step(accelerator.unwrap_model(model).parameters())
+
                     # Accumulate loss stats
                     loss_val = loss.item()
                     epoch_loss += loss_val
@@ -439,29 +486,38 @@ def train_ddpm(data_dir, model_type='conditional', epochs=500, batch_size=16,
                     
                     # Unwrap model before saving to ensure clean state dict
                     unwrapped_model = accelerator.unwrap_model(model)
-                    torch.save({
-                        'epoch': epoch + 1,
-                        'model_state_dict': unwrapped_model.state_dict(),
-                        'optimizer_state_dict': optimizer.state_dict(),
-                    }, checkpoint_path)
+                    torch.save(
+                        build_checkpoint(epoch + 1, unwrapped_model, optimizer, ema_model),
+                        checkpoint_path
+                    )
                     print(f"--> Saved checkpoint: {checkpoint_path}")
 
-                    # Generate and send samples
+                    # Generate and send samples — with EMA weights swapped in when
+                    # enabled, since those are what inference will load
                     try:
                         sample_dir = os.path.join(checkpoint_dir, "samples_during_training")
+                        if use_ema:
+                            ema_model.store(unwrapped_model.parameters())
+                            ema_model.copy_to(unwrapped_model.parameters())
                         rgb_collage, depth_collage = generate_samples_during_training(
                             unwrapped_model, epoch + 1, sample_dir, accelerator.device, model_type
                         )
-                        
-                        send_ntfy(ntfy_topic, f"🖼️ {model_type} Samples (RGB)", 
+
+                        send_ntfy(ntfy_topic, f"🖼️ {model_type} Samples (RGB)",
                                  f"Epoch {epoch+1} visual check", tags="art", image_path=rgb_collage)
-                        send_ntfy(ntfy_topic, f"📐 {model_type} Samples (Depth)", 
+                        send_ntfy(ntfy_topic, f"📐 {model_type} Samples (Depth)",
                                  f"Epoch {epoch+1} depth check", tags="triangular_ruler", image_path=depth_collage)
                     except Exception as e:
                         print(f"  [WARN] Failed to generate/send samples: {e}")
                         send_ntfy(ntfy_topic, f"💾 {model_type} checkpoint",
                                   f"Epoch {epoch+1}/{epochs} | loss: {avg_loss:.4f}",
                                   tags="floppy_disk")
+                    finally:
+                        if use_ema:
+                            ema_model.restore(unwrapped_model.parameters())
+                        # Sampling puts the live model in eval mode; switch back so
+                        # training resumes in train mode.
+                        unwrapped_model.train()
 
     except KeyboardInterrupt:
         accelerator.print("\n[INFO] Training interrupted by user. Saving current state...")
@@ -471,11 +527,10 @@ def train_ddpm(data_dir, model_type='conditional', epochs=500, batch_size=16,
         
         if accelerator.is_main_process:
             unwrapped_model = accelerator.unwrap_model(model)
-            torch.save({
-                'epoch': current_epoch,
-                'model_state_dict': unwrapped_model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-            }, checkpoint_path)
+            torch.save(
+                build_checkpoint(current_epoch, unwrapped_model, optimizer, ema_model),
+                checkpoint_path
+            )
             print(f"--> Saved interrupted checkpoint: {checkpoint_path}")
             print(f"To resume training, use: --resume_from {checkpoint_path}")
             send_ntfy(ntfy_topic, f"⏸️ {model_type} INTERRUPTED",
@@ -506,6 +561,7 @@ if __name__ == "__main__":
     parser.add_argument("-p", "--multi_gpu", action="store_true", help="Enable multi-GPU training if multiple GPUs are available.")
     parser.add_argument("-x", "--gradient_checkpointing", action="store_true", help="Enable to drastically reduce VRAM usage at the cost of speed.")
     parser.add_argument("-n", "--ntfy_topic", type=str, default=None, help="ntfy.sh topic for push notifications (e.g. 'dreamsea_adam'). Install ntfy app on phone and subscribe to the same topic.")
+    parser.add_argument("-w", "--ema_decay", type=float, default=0.9999, help="Decay for the EMA copy of model weights used for sampling/inference. Set to 0 to disable EMA.")
 
     args = parser.parse_args()
 
@@ -524,7 +580,8 @@ if __name__ == "__main__":
             device=args.device,
             multi_gpu=args.multi_gpu,
             gradient_checkpointing=args.gradient_checkpointing,
-            ntfy_topic=args.ntfy_topic
+            ntfy_topic=args.ntfy_topic,
+            ema_decay=args.ema_decay
         )
     except Exception as e:
         error_msg = f"{type(e).__name__}: {e}"
