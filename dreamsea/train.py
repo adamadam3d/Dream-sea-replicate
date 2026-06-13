@@ -214,7 +214,8 @@ def train_ddpm(data_dir, model_type='conditional', epochs=500, batch_size=16,
                checkpoint_dir='checkpoints', save_every=50, resume_from=None, 
                device='cuda' if torch.cuda.is_available() else 'cpu', multi_gpu=False,
                learning_rate=1e-4, gradient_accumulation_steps=1, mixed_precision='fp16',
-               gradient_checkpointing=False, ntfy_topic=None, ema_decay=0.9999):
+               gradient_checkpointing=False, ntfy_topic=None, ema_decay=0.9999,
+               cond_dropout_prob=0.1):
     """
     Training loop for DDPM models using preprocessed data.
     """
@@ -312,6 +313,8 @@ def train_ddpm(data_dir, model_type='conditional', epochs=500, batch_size=16,
     accelerator.print(f"Gradient accumulation steps: {gradient_accumulation_steps}")
     accelerator.print(f"Mixed precision: {accelerator.mixed_precision}")
     accelerator.print(f"EMA: {f'enabled (decay={ema_decay}, warmup on)' if use_ema else 'disabled'}")
+    if model_type == 'conditional':
+        accelerator.print(f"CFG condition dropout: {f'{cond_dropout_prob:.2f}' if cond_dropout_prob > 0 else 'disabled (legacy)'}")
     accelerator.print(f"Checkpoints will be saved to '{checkpoint_dir}' every {save_every} epochs.")
 
     if accelerator.is_main_process:
@@ -378,8 +381,20 @@ def train_ddpm(data_dir, model_type='conditional', epochs=500, batch_size=16,
                 with accelerator.accumulate(model):
                     if model_type == 'conditional':
                         clean_images, conditions = batch
-                        # Conditions need reshaping
-                        conditions = conditions.view(clean_images.shape[0], 1, 2)
+                        # Conditions need reshaping. Clone so the in-place CFG
+                        # dropout below never mutates the dataloader's batch tensor.
+                        conditions = conditions.reshape(clean_images.shape[0], 1, 2).clone()
+                        # Classifier-free guidance dropout: with probability
+                        # cond_dropout_prob, replace a sample's condition with the
+                        # null token (zeros). The PCA latents are unit-variance and
+                        # centered on ~0, so zero is the marginal/"no information"
+                        # condition; training the model to predict the dataset mean
+                        # there turns the zero latent into a true unconditional
+                        # branch, which is what CFG / guided SDS extrapolate from.
+                        # Set to 0 to reproduce the legacy no-dropout behavior.
+                        if cond_dropout_prob > 0:
+                            drop = torch.rand(clean_images.shape[0], device=clean_images.device) < cond_dropout_prob
+                            conditions[drop] = 0.0
                     else:
                         clean_images = batch
 
@@ -562,6 +577,12 @@ if __name__ == "__main__":
     parser.add_argument("-x", "--gradient_checkpointing", action="store_true", help="Enable to drastically reduce VRAM usage at the cost of speed.")
     parser.add_argument("-n", "--ntfy_topic", type=str, default=None, help="ntfy.sh topic for push notifications (e.g. 'dreamsea_adam'). Install ntfy app on phone and subscribe to the same topic.")
     parser.add_argument("-w", "--ema_decay", type=float, default=0.9999, help="Decay for the EMA copy of model weights used for sampling/inference. Set to 0 to disable EMA.")
+    parser.add_argument("-g", "--cond_dropout_prob", type=float, default=0.1,
+                        help="Classifier-free guidance dropout probability for the conditional model: "
+                             "fraction of samples whose condition is replaced with the null (zero) token "
+                             "each step. Makes the zero latent a true unconditional branch so CFG / guided "
+                             "SDS work. Set to 0 to reproduce legacy no-dropout training. Ignored for the "
+                             "unconditional model.")
 
     args = parser.parse_args()
 
@@ -581,7 +602,8 @@ if __name__ == "__main__":
             multi_gpu=args.multi_gpu,
             gradient_checkpointing=args.gradient_checkpointing,
             ntfy_topic=args.ntfy_topic,
-            ema_decay=args.ema_decay
+            ema_decay=args.ema_decay,
+            cond_dropout_prob=args.cond_dropout_prob
         )
     except Exception as e:
         error_msg = f"{type(e).__name__}: {e}"
