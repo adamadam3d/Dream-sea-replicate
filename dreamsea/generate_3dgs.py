@@ -20,12 +20,32 @@ DEFAULT_LATENT_STATS = {
     "std":  [ 14.020397186279297,   8.373991966247559],
 }
 
+def _load_reference_condition(reference_cond):
+    """Load a 2D condition vector from a preprocessed conditions/<name>_cond.pt file.
+
+    These are the exact PCA conditions saved by preprocess_dataset.py, so the
+    returned vector is a real, in-distribution training condition — no DINOv2/PCA
+    recomputation is needed to reuse it.
+    """
+    if not os.path.exists(reference_cond):
+        raise ValueError(
+            f"--reference_cond '{reference_cond}' not found. Pass the path to a preprocessed "
+            f"condition file, e.g. <preprocess_out>/conditions/<name>_cond.pt"
+        )
+    cond = torch.load(reference_cond, map_location='cpu', weights_only=True)
+    cond = np.asarray(cond.float().numpy(), dtype=np.float32).reshape(-1)
+    if cond.shape[0] != 2:
+        raise ValueError(
+            f"Reference condition must have 2 components, got {cond.shape[0]} from '{reference_cond}'."
+        )
+    return cond
+
 def generate_3dgs(cond_ckpt, uncond_ckpt, grid_size=3, roughness=0.5,
                   output_dir="outputs", sds_iterations=500, sds_guidance=0.0,
                   sds_rgbd=False, sds_anchor=1.0,
                   latent_stats_path=None, use_conditional_stitching=False,
                   rasterizer="gsplat", save_init_ply=False, upscale_factor=1.0,
-                  splat_scale=0.75,
+                  splat_scale=0.75, reference_cond=None, reference_spread=1.0,
                   device='cuda' if torch.cuda.is_available() else 'cpu'):
     """
     Full pipeline to generate a 3DGS scene from trained checkpoints.
@@ -83,13 +103,32 @@ def generate_3dgs(cond_ckpt, uncond_ckpt, grid_size=3, roughness=0.5,
                   f"falling back to built-in default latent stats.")
 
     if "mean" in latent_stats and "std" in latent_stats:
-        latent_grid = scale_latent_grid(latent_grid, latent_stats["mean"], latent_stats["std"])
+        base_mean = np.array(latent_stats["mean"], dtype=np.float32)
+        base_std = np.array(latent_stats["std"], dtype=np.float32)
     else:
         # Older stats files stored only min/max — approximate a Gaussian fit
         # (mean = midpoint, std ~= range/4) so the fixed affine map still works.
         lo = np.array(latent_stats["min"], dtype=np.float32)
         hi = np.array(latent_stats["max"], dtype=np.float32)
-        latent_grid = scale_latent_grid(latent_grid, (lo + hi) / 2.0, (hi - lo) / 4.0)
+        base_mean = (lo + hi) / 2.0
+        base_std = (hi - lo) / 4.0
+
+    # Optionally re-center the fractal field on a chosen preprocessed sample's
+    # condition so the whole scene is generated "of that type". The reference is
+    # the 2D PCA vector already saved at preprocessing (conditions/<name>_cond.pt),
+    # so it is exactly in-distribution. reference_spread scales how far patches
+    # vary around it: 1.0 = natural terrain variation, 0.0 = every patch identical.
+    if reference_cond:
+        ref_latent = _load_reference_condition(reference_cond)
+        grid_mean = ref_latent
+        grid_std = base_std * reference_spread
+        print(f"Centering generation on reference condition {ref_latent.tolist()} "
+              f"from '{reference_cond}' (spread x{reference_spread}).")
+    else:
+        grid_mean = base_mean
+        grid_std = base_std
+
+    latent_grid = scale_latent_grid(latent_grid, grid_mean, grid_std)
     print(f"Latent grid mapped into training PCA distribution using: {stats_source}")
 
     print(f"Latent grid generated.")
@@ -294,6 +333,15 @@ if __name__ == "__main__":
                              "Lower = sharper texture (risk of pinholes on steep slopes), "
                              "higher = smoother/safer coverage. 0.75 keeps the surface "
                              "hole-free without blurring the RGBD map.")
+    parser.add_argument("-R", "--reference_cond", type=str, default=None,
+                        help="Path to a preprocessed condition file (conditions/<name>_cond.pt) from "
+                             "preprocess_dataset.py. Centers the whole generation on that sample's 2D "
+                             "condition so the scene comes out 'of that type'. Guaranteed "
+                             "in-distribution — it is a real training condition, not a fractal guess.")
+    parser.add_argument("-X", "--reference_spread", type=float, default=1.0,
+                        help="When --reference_cond is set, multiplier on the per-axis latent std used "
+                             "to vary patches around the reference. 1.0 = natural terrain variation "
+                             "around that type; 0.0 = every patch is exactly that type.")
     parser.add_argument("-d", "--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Compute device.")
 
     args = parser.parse_args()
@@ -314,5 +362,7 @@ if __name__ == "__main__":
         save_init_ply=args.save_init_ply,
         upscale_factor=args.upscale_factor,
         splat_scale=args.splat_scale,
+        reference_cond=args.reference_cond,
+        reference_spread=args.reference_spread,
         device=args.device
     )
