@@ -215,7 +215,7 @@ def train_ddpm(data_dir, model_type='conditional', epochs=500, batch_size=16,
                device='cuda' if torch.cuda.is_available() else 'cpu', multi_gpu=False,
                learning_rate=1e-4, gradient_accumulation_steps=1, mixed_precision='fp16',
                gradient_checkpointing=False, ntfy_topic=None, ema_decay=0.9999,
-               cond_dropout_prob=0.1):
+               cond_dropout_prob=0.0):
     """
     Training loop for DDPM models using preprocessed data.
     """
@@ -577,12 +577,13 @@ if __name__ == "__main__":
     parser.add_argument("-x", "--gradient_checkpointing", action="store_true", help="Enable to drastically reduce VRAM usage at the cost of speed.")
     parser.add_argument("-n", "--ntfy_topic", type=str, default=None, help="ntfy.sh topic for push notifications (e.g. 'dreamsea_adam'). Install ntfy app on phone and subscribe to the same topic.")
     parser.add_argument("-w", "--ema_decay", type=float, default=0.9999, help="Decay for the EMA copy of model weights used for sampling/inference. Set to 0 to disable EMA.")
-    parser.add_argument("-g", "--cond_dropout_prob", type=float, default=0.1,
+    parser.add_argument("-g", "--cond_dropout_prob", type=float, default=0.0,
                         help="Classifier-free guidance dropout probability for the conditional model: "
                              "fraction of samples whose condition is replaced with the null (zero) token "
-                             "each step. Makes the zero latent a true unconditional branch so CFG / guided "
-                             "SDS work. Set to 0 to reproduce legacy no-dropout training. Ignored for the "
-                             "unconditional model.")
+                             "each step. Default 0 (off): we do not use CFG at inference, and dropout makes "
+                             "the [0,0] condition a clean mean-attractor while weakly-used real conditions "
+                             "degrade — forcing the model to always use the condition gives stronger type "
+                             "control. Set >0 only if you intend to use CFG. Ignored for the unconditional model.")
 
     args = parser.parse_args()
 
