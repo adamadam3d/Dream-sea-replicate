@@ -67,12 +67,46 @@ def _load_ddpm_checkpoint(model, ckpt_path, device):
         ) from e
 
 
+def _detect_cond_embed_dim(ckpt_path, device, default=256):
+    """Infer the ConditionalDDPM architecture a checkpoint needs.
+
+    Returns the cond_embed_dim to construct the model with so that BOTH legacy
+    bare-2D checkpoints (no cond_embed MLP, cross_attention_dim=2) and new
+    embed-MLP checkpoints load without manual flags:
+      - 0  -> legacy checkpoint (no cond_embed.* params)
+      - N  -> embed-MLP checkpoint; N is read from the first Linear's out_features
+    """
+    checkpoint = torch.load(ckpt_path, map_location='cpu', weights_only=False)
+    if isinstance(checkpoint, dict) and 'ema_model_state_dict' in checkpoint:
+        state_dict = checkpoint['ema_model_state_dict']
+    elif isinstance(checkpoint, dict) and 'model_state_dict' in checkpoint:
+        state_dict = checkpoint['model_state_dict']
+    else:
+        state_dict = checkpoint
+    embed_w = None
+    for k, v in state_dict.items():
+        if (k[7:] if k.startswith('module.') else k) == 'cond_embed.0.weight':
+            embed_w = v
+            break
+    if embed_w is None:
+        return 0  # legacy: no embedding MLP
+    return int(embed_w.shape[0])
+
+
 class GeneratorInpainter:
     def __init__(self, cond_model_path=None, uncond_model_path=None, device='cuda' if torch.cuda.is_available() else 'cpu'):
         self.device = device
 
-        # Load conditional DDPM
-        self.cond_model = ConditionalDDPM().to(device)
+        # Load conditional DDPM. Detect the checkpoint's architecture first so a
+        # legacy bare-2D checkpoint and a new embed-MLP checkpoint both load
+        # cleanly into a matching model (default to the new arch when none given).
+        cond_embed_dim = 256
+        if cond_model_path:
+            cond_embed_dim = _detect_cond_embed_dim(cond_model_path, device)
+            if cond_embed_dim == 0:
+                print(f"Note: '{cond_model_path}' is a legacy bare-2D conditional checkpoint "
+                      f"(no embed MLP). Loading it with the legacy architecture.")
+        self.cond_model = ConditionalDDPM(cond_embed_dim=cond_embed_dim).to(device)
         if cond_model_path:
             _load_ddpm_checkpoint(self.cond_model, cond_model_path, device)
         self.cond_model.eval()
