@@ -46,6 +46,7 @@ def generate_3dgs(cond_ckpt, uncond_ckpt, grid_size=3, roughness=0.5,
                   latent_stats_path=None, use_conditional_stitching=False,
                   rasterizer="gsplat", save_init_ply=False, upscale_factor=1.0,
                   splat_scale=0.75, reference_cond=None, reference_spread=1.0,
+                  latent_vector=None,
                   device='cuda' if torch.cuda.is_available() else 'cpu'):
     """
     Full pipeline to generate a 3DGS scene from trained checkpoints.
@@ -84,9 +85,16 @@ def generate_3dgs(cond_ckpt, uncond_ckpt, grid_size=3, roughness=0.5,
         device=device
     )
 
-    # 2. Generate Fractal Latent Grid
-    print(f"\n--- 2. Generating Fractal Latent Grid (size: {grid_size}x{grid_size}) ---")
-    latent_grid = diamond_square_2d(grid_size, roughness=roughness)
+    # 2. Generate Latent Grid (Fractal or Constant)
+    if latent_vector is not None:
+        # User provided a fixed 2D condition: use it for all patches (uniform scene)
+        print(f"\n--- 2. Using Constant Latent Vector ---")
+        print(f"Latent condition: {latent_vector.tolist()}")
+        latent_grid = np.full((grid_size, grid_size, 2), latent_vector, dtype=np.float32)
+    else:
+        # Generate a fractal grid with natural variation
+        print(f"\n--- 2. Generating Fractal Latent Grid (size: {grid_size}x{grid_size}) ---")
+        latent_grid = diamond_square_2d(grid_size, roughness=roughness)
 
     # Rescale the grid into the PCA coordinate range seen during training so the
     # conditional model receives in-distribution latent vectors. Use an explicit
@@ -342,9 +350,26 @@ if __name__ == "__main__":
                         help="When --reference_cond is set, multiplier on the per-axis latent std used "
                              "to vary patches around the reference. 1.0 = natural terrain variation "
                              "around that type; 0.0 = every patch is exactly that type.")
+    parser.add_argument("-L", "--latent_vector", type=str, default=None,
+                        help="Fixed 2D latent condition (comma-separated, e.g. '0.5,-0.3'). "
+                             "If provided, ALL patches use this constant condition (uniform scene type). "
+                             "Overrides --reference_cond. Useful for testing specific conditions or generating "
+                             "consistent, homogeneous terrain without fractal variation.")
     parser.add_argument("-d", "--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Compute device.")
 
     args = parser.parse_args()
+
+    # Parse latent vector if provided
+    latent_vec = None
+    if args.latent_vector:
+        try:
+            latent_vec = np.array([float(x) for x in args.latent_vector.split(',')], dtype=np.float32)
+            if latent_vec.shape[0] != 2:
+                raise ValueError("Latent vector must have exactly 2 components.")
+        except Exception as e:
+            print(f"Error parsing --latent_vector '{args.latent_vector}': {e}")
+            import sys
+            sys.exit(1)
 
     generate_3dgs(
         cond_ckpt=args.cond_ckpt,
@@ -364,5 +389,6 @@ if __name__ == "__main__":
         splat_scale=args.splat_scale,
         reference_cond=args.reference_cond,
         reference_spread=args.reference_spread,
+        latent_vector=latent_vec,
         device=args.device
     )
