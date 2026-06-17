@@ -136,8 +136,16 @@ def generate_3dgs(cond_ckpt, uncond_ckpt, grid_size=3, roughness=0.5,
         grid_mean = base_mean
         grid_std = base_std
 
-    latent_grid = scale_latent_grid(latent_grid, grid_mean, grid_std)
-    print(f"Latent grid mapped into training PCA distribution using: {stats_source}")
+    # An explicit --latent_vector is already a raw PCA coordinate (same space as
+    # the saved conditions/*.pt and generate_sample.py's --latent_vector), so it
+    # is fed to the model DIRECTLY. scale_latent_grid is only for mapping the
+    # unit-variance fractal field into the PCA range — applying it here would
+    # multiply the user's value by ~std and push it out of distribution.
+    if latent_vector is not None:
+        print(f"Using constant latent condition directly (no rescale): {latent_vector.tolist()}")
+    else:
+        latent_grid = scale_latent_grid(latent_grid, grid_mean, grid_std)
+        print(f"Latent grid mapped into training PCA distribution using: {stats_source}")
 
     print(f"Latent grid generated.")
 
@@ -351,10 +359,12 @@ if __name__ == "__main__":
                              "to vary patches around the reference. 1.0 = natural terrain variation "
                              "around that type; 0.0 = every patch is exactly that type.")
     parser.add_argument("-L", "--latent_vector", type=str, default=None,
-                        help="Fixed 2D latent condition (comma-separated, e.g. '0.5,-0.3'). "
-                             "If provided, ALL patches use this constant condition (uniform scene type). "
-                             "Overrides --reference_cond. Useful for testing specific conditions or generating "
-                             "consistent, homogeneous terrain without fractal variation.")
+                        help="Fixed 2D latent condition as a RAW PCA coordinate (comma-separated, e.g. "
+                             "'0,0' for the dataset mean, or values up to ~±std from latent_stats). Same "
+                             "space as generate_sample.py's --latent_vector and the saved conditions/*.pt, "
+                             "so it is fed to the model directly (NOT rescaled). If provided, ALL patches use "
+                             "this constant condition (uniform scene type). Overrides --reference_cond. "
+                             "Useful for testing a specific condition or reproducing a generate_sample.py result in 3D.")
     parser.add_argument("-d", "--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Compute device.")
 
     args = parser.parse_args()
