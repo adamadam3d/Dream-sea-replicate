@@ -1,7 +1,6 @@
 import argparse
 import torch
 import numpy as np
-from pathlib import Path
 from dreamsea.generation_inpainting import GeneratorInpainter
 
 def main():
