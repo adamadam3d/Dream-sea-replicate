@@ -36,6 +36,13 @@ def main():
                              "trained at 224 and is being sampled off-distribution at this size to "
                              "test whether the fully-convolutional UNet generalizes to a larger "
                              "single-patch output. Default 896.")
+    parser.add_argument("--redilate", action="store_true",
+                        help="Apply ScaleCrafter re-dilation when patch_size > 224: scales the convs' "
+                             "receptive field to the larger canvas during the early denoising steps to "
+                             "prevent repeated-tile artifacts. Off by default.")
+    parser.add_argument("--redilation_fraction", type=float, default=0.5,
+                        help="Fraction of denoising steps (from the noisiest) that run with dilated "
+                             "convs. Higher = more coherent global layout, lower = sharper texture.")
     args = parser.parse_args()
 
     # Parse latent vector
@@ -83,7 +90,9 @@ def main():
         print(f"Running diffusion generation (this takes ~{args.num_inference_steps} steps)...")
         try:
             patch = inpainter.generate_patch(latent_condition, num_inference_steps=args.num_inference_steps,
-                                              patch_size=args.patch_size) # Shape: (1, 4, patch_size, patch_size)
+                                              patch_size=args.patch_size,
+                                              redilate=args.redilate,
+                                              redilation_fraction=args.redilation_fraction) # Shape: (1, 4, patch_size, patch_size)
         except Exception as e:
              print(f"Error during generation: {e}")
              continue

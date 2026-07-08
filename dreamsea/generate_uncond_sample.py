@@ -5,6 +5,7 @@ from PIL import Image
 from pathlib import Path
 from diffusers import DDPMScheduler
 from dreamsea.models import UnconditionalDDPM
+from dreamsea.redilation import ReDilation
 
 def normalize_tensor_to_image(tensor):
     """
@@ -16,7 +17,8 @@ def normalize_tensor_to_image(tensor):
     image_np = (image_np * 255).astype(np.uint8)
     return image_np
 
-def generate_unconditional(model_path, output_dir, num_inference_steps=1000, device='cuda', patch_size=224):
+def generate_unconditional(model_path, output_dir, num_inference_steps=1000, device='cuda', patch_size=224,
+                           redilate=False, redilation_fraction=0.5):
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -45,12 +47,30 @@ def generate_unconditional(model_path, output_dir, num_inference_steps=1000, dev
     # Start from pure noise
     image = torch.randn(1, 4, patch_size, patch_size, device=device)
 
-    with torch.no_grad():
-        for t in scheduler.timesteps:
-            # Unconditional prediction (no text/conditions)
-            noise_pred = model(image, t)
-            # Denoise step
-            image = scheduler.step(noise_pred, t, image).prev_sample
+    timesteps = scheduler.timesteps
+    redila = None
+    n_dilated_steps = 0
+    if redilate and patch_size > 224:
+        redila = ReDilation(model, patch_size / 224)
+        n_dilated_steps = int(len(timesteps) * redilation_fraction)
+        print(f"Re-dilation x{redila.scale} active for the first "
+              f"{n_dilated_steps}/{len(timesteps)} steps.")
+
+    try:
+        with torch.no_grad():
+            for i, t in enumerate(timesteps):
+                if redila is not None:
+                    if i < n_dilated_steps:
+                        redila.enable()
+                    else:
+                        redila.disable()
+                # Unconditional prediction (no text/conditions)
+                noise_pred = model(image, t)
+                # Denoise step
+                image = scheduler.step(noise_pred, t, image).prev_sample
+    finally:
+        if redila is not None:
+            redila.disable()
 
     # Extract RGB and Depth
     patch_tensor = image[0] # (4, 224, 224)
@@ -87,6 +107,13 @@ if __name__ == "__main__":
                              "trained at 224 and is being sampled off-distribution at this size to "
                              "test whether the fully-convolutional UNet generalizes to a larger "
                              "single-patch output. Default 896.")
+    parser.add_argument("--redilate", action="store_true",
+                        help="Apply ScaleCrafter re-dilation when patch_size > 224: scales the convs' "
+                             "receptive field to the larger canvas during the early denoising steps to "
+                             "prevent repeated-tile artifacts. Off by default.")
+    parser.add_argument("--redilation_fraction", type=float, default=0.5,
+                        help="Fraction of denoising steps (from the noisiest) that run with dilated "
+                             "convs. Higher = more coherent global layout, lower = sharper texture.")
     args = parser.parse_args()
 
     generate_unconditional(
@@ -94,5 +121,7 @@ if __name__ == "__main__":
         output_dir=args.output_dir,
         num_inference_steps=args.num_inference_steps,
         device=args.device,
-        patch_size=args.patch_size
+        patch_size=args.patch_size,
+        redilate=args.redilate,
+        redilation_fraction=args.redilation_fraction
     )

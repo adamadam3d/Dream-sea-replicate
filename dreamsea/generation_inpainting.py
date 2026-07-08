@@ -2,6 +2,7 @@ import torch
 import numpy as np
 from diffusers import DDPMScheduler
 from .models import ConditionalDDPM, UnconditionalDDPM
+from .redilation import ReDilation
 
 
 def _load_ddpm_checkpoint(model, ckpt_path, device):
@@ -120,13 +121,19 @@ class GeneratorInpainter:
         self.scheduler = DDPMScheduler(num_train_timesteps=1000)
 
     @torch.no_grad()
-    def generate_patch(self, latent_condition, num_inference_steps=1000, patch_size=224):
+    def generate_patch(self, latent_condition, num_inference_steps=1000, patch_size=224,
+                       redilate=False, redilation_fraction=0.5):
         """
         Generates a 4-channel RGBD patch (patch_size x patch_size) using the conditional DDPM
         based on the latent condition. The UNet is fully convolutional (and its attention block
         is resolution-agnostic), so it can be sampled at any patch_size divisible by 32 even
         though it was trained at 224 — the model just never saw that receptive field during
         training, which is the tradeoff being tested at larger sizes.
+
+        redilate: when sampling above 224, apply ScaleCrafter re-dilation for the first
+        redilation_fraction of the denoising steps so the global composition is laid out with
+        a training-scale receptive field (fixes repeated-tile artifacts); the remaining steps
+        run undilated so fine texture stays sharp.
         """
         # latent_condition is shape (2,) numpy or tensor
         if not isinstance(latent_condition, torch.Tensor):
@@ -142,14 +149,35 @@ class GeneratorInpainter:
 
         # Denoising loop
         self.scheduler.set_timesteps(num_inference_steps=num_inference_steps)
-        for t in self.scheduler.timesteps:
-            # Predict noise residual
-            noise_pred = self.cond_model(image, t, encoder_hidden_states=condition)
+        timesteps = self.scheduler.timesteps
 
-            # Compute previous noisy sample x_t -> x_t-1
-            image = self.scheduler.step(noise_pred, t, image).prev_sample
+        redila = None
+        n_dilated_steps = 0
+        if redilate and patch_size > 224:
+            redila = ReDilation(self.cond_model, patch_size / 224)
+            n_dilated_steps = int(len(timesteps) * redilation_fraction)
+            print(f"Re-dilation x{redila.scale} active for the first "
+                  f"{n_dilated_steps}/{len(timesteps)} steps.")
 
-        return image.cpu().numpy() # (1, 4, 224, 224)
+        try:
+            for i, t in enumerate(timesteps):
+                if redila is not None:
+                    if i < n_dilated_steps:
+                        redila.enable()
+                    else:
+                        redila.disable()
+
+                # Predict noise residual
+                noise_pred = self.cond_model(image, t, encoder_hidden_states=condition)
+
+                # Compute previous noisy sample x_t -> x_t-1
+                image = self.scheduler.step(noise_pred, t, image).prev_sample
+        finally:
+            # Never leave the shared model dilated for later callers (grid gen, SDS).
+            if redila is not None:
+                redila.disable()
+
+        return image.cpu().numpy() # (1, 4, patch_size, patch_size)
 
     def generate_grid(self, latent_grid):
         """
