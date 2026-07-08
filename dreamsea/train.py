@@ -3,6 +3,7 @@ import argparse
 import time
 import traceback
 import urllib.request
+import urllib.parse
 import json
 import math
 from pathlib import Path
@@ -28,7 +29,6 @@ def send_ntfy(topic, title, message, priority="default", tags="", image_path=Non
         prio_int = prio_map.get(priority, 3)
         
         if image_path and os.path.exists(image_path):
-            import urllib.parse
             # ntfy allows sending a file by PUTing the raw bytes
             with open(image_path, 'rb') as f:
                 data = f.read()
