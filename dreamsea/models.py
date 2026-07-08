@@ -101,3 +101,36 @@ class UnconditionalDDPM(nn.Module):
         Forward pass for the UNet unconditional model.
         """
         return self.unet(sample, timestep).sample
+
+
+class SRDDPM(nn.Module):
+    """x4 super-resolution DDPM (SR3-style) — stage 2 of the generation cascade.
+
+    Denoises a high-res RGBD patch conditioned on its bilinearly-upsampled
+    low-res counterpart, concatenated channel-wise onto the noisy input
+    (4 noise + 4 LR = 8 in_channels).
+
+    Architecture follows SR3+ (Sahak et al. 2023): a conv-only UNet with NO
+    self-attention — attention hurts generalization across inference
+    resolutions/aspect ratios, and this stage always runs far above its
+    training-crop size. It is also slimmer than the base generator (4 levels):
+    super-resolution is a local texture task whose global structure is pinned
+    by the LR conditioning, so scene-scale capacity would only overfit the
+    small dataset. Fully convolutional: trained on 224 crops, runs at any
+    input size divisible by 8.
+    """
+    def __init__(self, in_channels=8, out_channels=4, sample_size=224):
+        super().__init__()
+        self.unet = UNet2DModel(
+            sample_size=sample_size,
+            in_channels=in_channels,
+            out_channels=out_channels,
+            layers_per_block=2,
+            block_out_channels=(64, 128, 256, 256),
+            down_block_types=("DownBlock2D", "DownBlock2D", "DownBlock2D", "DownBlock2D"),
+            up_block_types=("UpBlock2D", "UpBlock2D", "UpBlock2D", "UpBlock2D"),
+        )
+
+    def forward(self, sample, timestep):
+        """sample is the channel-wise concat [noisy_hr (4ch), lr_upsampled (4ch)]."""
+        return self.unet(sample, timestep).sample

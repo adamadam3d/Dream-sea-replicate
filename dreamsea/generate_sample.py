@@ -43,6 +43,12 @@ def main():
     parser.add_argument("--redilation_fraction", type=float, default=0.5,
                         help="Fraction of denoising steps (from the noisiest) that run with dilated "
                              "convs. Higher = more coherent global layout, lower = sharper texture.")
+    parser.add_argument("--sr_ckpt", type=str, default=None,
+                        help="Optional trained SR-stage checkpoint. When given, each generated patch "
+                             "is additionally x4-upscaled through the SR DDPM (cascade: use -p 224 "
+                             "for the base patch, giving 896 output).")
+    parser.add_argument("--sr_steps", type=int, default=100,
+                        help="Denoising steps for the SR stage (only with --sr_ckpt).")
     args = parser.parse_args()
 
     # Parse latent vector
@@ -72,6 +78,15 @@ def main():
         print(f"Using checkpoint: {args.cond_model_path}")
     else:
         print("WARNING: No checkpoint provided. Generating with RANDOM UNTRAINED weights.")
+
+    sr_model = None
+    sr_scheduler = None
+    if args.sr_ckpt:
+        from diffusers import DDPMScheduler
+        from dreamsea.sr_upscale import load_sr_model, sr_upscale_rgbd, save_rgbd_outputs
+        print(f"Loading SR stage from: {args.sr_ckpt}")
+        sr_model = load_sr_model(args.sr_ckpt, args.device)
+        sr_scheduler = DDPMScheduler(num_train_timesteps=1000)
 
     all_rgb_images = []
     all_depth_images = []
@@ -127,6 +142,15 @@ def main():
         print(f"Success! Sample {i+1} saved to:")
         print(f" - {rgb_path}")
         print(f" - {depth_path}")
+
+        # Cascade stage 2: x4 SR of the freshly generated patch
+        if sr_model is not None:
+            print(f"Running x4 SR stage ({args.sr_steps} steps)...")
+            sr = sr_upscale_rgbd(patch_tensor, sr_model, sr_scheduler,
+                                 num_inference_steps=args.sr_steps, device=args.device)
+            sr_rgb, sr_depth, _ = save_rgbd_outputs(sr, output_dir, f"generated_{i+1}_sr4x")
+            print(f" - {sr_rgb}")
+            print(f" - {sr_depth}")
 
     # --- Create Collage ---
     if len(all_rgb_images) > 0:
