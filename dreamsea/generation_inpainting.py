@@ -120,9 +120,13 @@ class GeneratorInpainter:
         self.scheduler = DDPMScheduler(num_train_timesteps=1000)
 
     @torch.no_grad()
-    def generate_patch(self, latent_condition, num_inference_steps=1000):
+    def generate_patch(self, latent_condition, num_inference_steps=1000, patch_size=224):
         """
-        Generates a 4-channel RGBD patch (224x224) using the conditional DDPM based on the latent condition.
+        Generates a 4-channel RGBD patch (patch_size x patch_size) using the conditional DDPM
+        based on the latent condition. The UNet is fully convolutional (and its attention block
+        is resolution-agnostic), so it can be sampled at any patch_size divisible by 32 even
+        though it was trained at 224 — the model just never saw that receptive field during
+        training, which is the tradeoff being tested at larger sizes.
         """
         # latent_condition is shape (2,) numpy or tensor
         if not isinstance(latent_condition, torch.Tensor):
@@ -134,7 +138,7 @@ class GeneratorInpainter:
         condition = condition.view(1, 1, 2)
 
         # Start from random noise
-        image = torch.randn(1, 4, 224, 224, device=self.device)
+        image = torch.randn(1, 4, patch_size, patch_size, device=self.device)
 
         # Denoising loop
         self.scheduler.set_timesteps(num_inference_steps=num_inference_steps)

@@ -16,7 +16,7 @@ def normalize_tensor_to_image(tensor):
     image_np = (image_np * 255).astype(np.uint8)
     return image_np
 
-def generate_unconditional(model_path, output_dir, num_inference_steps=1000, device='cuda'):
+def generate_unconditional(model_path, output_dir, num_inference_steps=1000, device='cuda', patch_size=224):
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -43,7 +43,7 @@ def generate_unconditional(model_path, output_dir, num_inference_steps=1000, dev
     print(f"Generating random RGBD patch (this takes ~{num_inference_steps} steps)...")
     
     # Start from pure noise
-    image = torch.randn(1, 4, 224, 224, device=device)
+    image = torch.randn(1, 4, patch_size, patch_size, device=device)
 
     with torch.no_grad():
         for t in scheduler.timesteps:
@@ -82,11 +82,17 @@ if __name__ == "__main__":
     parser.add_argument("-o", "--output_dir", type=str, default="samples", help="Directory to save the generated images.")
     parser.add_argument("-d", "--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Compute device.")
     parser.add_argument("-s", "--num_inference_steps", type=int, default=1000, help="Number of denoising steps.")
+    parser.add_argument("-p", "--patch_size", type=int, default=896,
+                        help="Output resolution (square, must be divisible by 32). The model was "
+                             "trained at 224 and is being sampled off-distribution at this size to "
+                             "test whether the fully-convolutional UNet generalizes to a larger "
+                             "single-patch output. Default 896.")
     args = parser.parse_args()
 
     generate_unconditional(
         model_path=args.uncond_model_path,
         output_dir=args.output_dir,
         num_inference_steps=args.num_inference_steps,
-        device=args.device
+        device=args.device,
+        patch_size=args.patch_size
     )

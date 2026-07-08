@@ -31,6 +31,11 @@ def main():
     parser.add_argument("-r", "--no_random", action="store_true", help="If set, do not add noise to the latent vector between samples.")
     parser.add_argument("-d", "--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Compute device.")
     parser.add_argument("-s", "--num_inference_steps", type=int, default=1000, help="Number of denoising steps (higher = better quality but slower).")
+    parser.add_argument("-p", "--patch_size", type=int, default=896,
+                        help="Output resolution (square, must be divisible by 32). The model was "
+                             "trained at 224 and is being sampled off-distribution at this size to "
+                             "test whether the fully-convolutional UNet generalizes to a larger "
+                             "single-patch output. Default 896.")
     args = parser.parse_args()
 
     # Parse latent vector
@@ -77,7 +82,8 @@ def main():
         # 2. Generate the patch
         print(f"Running diffusion generation (this takes ~{args.num_inference_steps} steps)...")
         try:
-            patch = inpainter.generate_patch(latent_condition, num_inference_steps=args.num_inference_steps) # Shape: (1, 4, 224, 224)
+            patch = inpainter.generate_patch(latent_condition, num_inference_steps=args.num_inference_steps,
+                                              patch_size=args.patch_size) # Shape: (1, 4, patch_size, patch_size)
         except Exception as e:
              print(f"Error during generation: {e}")
              continue
