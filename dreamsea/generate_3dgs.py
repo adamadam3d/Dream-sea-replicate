@@ -46,7 +46,8 @@ def generate_3dgs(cond_ckpt, uncond_ckpt, grid_size=3, roughness=0.5,
                   latent_stats_path=None, use_conditional_stitching=False,
                   rasterizer="gsplat", save_init_ply=False, upscale_factor=1.0,
                   splat_scale=0.75, reference_cond=None, reference_spread=1.0,
-                  latent_vector=None,
+                  latent_vector=None, sr_ckpt=None, sr_factor=4, sr_steps=100,
+                  sr_color_correct=True, sr_color_strength=1.0,
                   device='cuda' if torch.cuda.is_available() else 'cpu'):
     """
     Full pipeline to generate a 3DGS scene from trained checkpoints.
@@ -165,19 +166,43 @@ def generate_3dgs(cond_ckpt, uncond_ckpt, grid_size=3, roughness=0.5,
     torch.save(torch.from_numpy(global_map), map_path)
     print(f"Global RGBD Map saved to: {map_path}")
 
-    # Upscale stitched RGBD map if requested to increase 3DGS resolution
-    if upscale_factor > 1.0:
+    # Increase 3DGS resolution by upscaling the stitched RGBD map. Two paths:
+    #  - --sr_ckpt: real xN diffusion super-resolution (the trained SR cascade),
+    #    run tiled over the seam-corrected map so the SR model stays at its
+    #    trained ~224 resolution and large maps don't OOM. This adds genuine
+    #    high-frequency detail (and color-corrects the diffusion hue drift).
+    #  - otherwise --upscale_factor: plain bilinear resize (more points, no new
+    #    detail) — the legacy behavior, kept as the no-SR fallback.
+    if sr_ckpt:
+        from diffusers import DDPMScheduler  # noqa: F401 (ensures diffusers import path)
+        from dreamsea.sr_upscale import load_sr_model, make_sr_scheduler, sr_upscale_tiled
+        print(f"\n--- Super-resolving global map x{sr_factor} (SR cascade) ---")
+        print(f"Loading SR stage from: {sr_ckpt}")
+        sr_model = load_sr_model(sr_ckpt, device)
+        sr_scheduler = make_sr_scheduler(sr_ckpt)
+        in_map = torch.from_numpy(global_map).float()  # (4, H, W) in [-1, 1]
+        sr_map = sr_upscale_tiled(in_map, sr_model, sr_scheduler, factor=sr_factor,
+                                  num_inference_steps=sr_steps, device=device,
+                                  color_correct=sr_color_correct,
+                                  color_strength=sr_color_strength)
+        global_map = sr_map.numpy()
+        # Downstream point-cloud tiling scales its patch/overlap by upscale_factor,
+        # so make it match the resolution the SR pass actually produced.
+        upscale_factor = float(sr_factor)
+        print(f"SR map: {in_map.shape[2]}x{in_map.shape[1]} -> "
+              f"{global_map.shape[2]}x{global_map.shape[1]} (factor: {sr_factor})")
+    elif upscale_factor > 1.0:
         global_tensor = torch.from_numpy(global_map).unsqueeze(0).to(device)
         new_H = int(global_map.shape[1] * upscale_factor)
         new_W = int(global_map.shape[2] * upscale_factor)
-        
+
         rgb_upscaled = torch.nn.functional.interpolate(
             global_tensor[:, :3], size=(new_H, new_W), mode='bilinear', align_corners=False
         )
         depth_upscaled = torch.nn.functional.interpolate(
             global_tensor[:, 3:4], size=(new_H, new_W), mode='bilinear', align_corners=False
         )
-        
+
         global_tensor_upscaled = torch.cat([rgb_upscaled, depth_upscaled], dim=1)
         global_map = global_tensor_upscaled.squeeze(0).cpu().numpy()
         print(f"Upscaled global RGBD map from {global_tensor.shape[2]}x{global_tensor.shape[3]} "
@@ -343,7 +368,23 @@ if __name__ == "__main__":
     parser.add_argument("-p", "--save_init_ply", action="store_true",
                         help="Save the initial point cloud/3DGS model as a .ply file before performing SDS optimization.")
     parser.add_argument("-f", "--upscale_factor", type=float, default=1.0,
-                        help="Upscale factor for the stitched RGBD map before unprojecting. Values > 1.0 increase point density/3DGS resolution.")
+                        help="Bilinear upscale factor for the stitched RGBD map before unprojecting "
+                             "(more points, no new detail). Ignored when --sr_ckpt is given. Values > 1.0 "
+                             "increase point density/3DGS resolution.")
+    parser.add_argument("--sr_ckpt", type=str, default=None,
+                        help="Trained SR-stage checkpoint. When set, the stitched RGBD map is "
+                             "super-resolved with the diffusion SR cascade (tiled, so it stays at "
+                             "the model's trained resolution and won't OOM) instead of bilinear "
+                             "upscaling — adds real high-frequency detail for the 3DGS.")
+    parser.add_argument("--sr_factor", type=int, default=4,
+                        help="SR upscale factor (the model is trained for 4).")
+    parser.add_argument("--sr_steps", type=int, default=100,
+                        help="Denoising steps per SR tile.")
+    parser.add_argument("--no_sr_color_correct", action="store_true",
+                        help="Disable AdaIN color correction on the SR output (on by default; "
+                             "removes the diffusion-SR hue drift).")
+    parser.add_argument("--sr_color_strength", type=float, default=1.0,
+                        help="Blend factor for SR color correction in [0, 1].")
     parser.add_argument("-k", "--splat_scale", type=float, default=0.75,
                         help="Initial Gaussian size as a multiple of the inter-point spacing. "
                              "Lower = sharper texture (risk of pinholes on steep slopes), "
@@ -400,5 +441,10 @@ if __name__ == "__main__":
         reference_cond=args.reference_cond,
         reference_spread=args.reference_spread,
         latent_vector=latent_vec,
+        sr_ckpt=args.sr_ckpt,
+        sr_factor=args.sr_factor,
+        sr_steps=args.sr_steps,
+        sr_color_correct=not args.no_sr_color_correct,
+        sr_color_strength=args.sr_color_strength,
         device=args.device
     )

@@ -111,6 +111,72 @@ def sr_upscale_rgbd(rgbd, model, scheduler, num_inference_steps=100, factor=4,
     return out
 
 
+def _tile_starts(size, tile, stride):
+    """Window start indices covering [0, size) with a `tile`-wide window; the last
+    window is snapped to the edge so the whole span is covered."""
+    if size <= tile:
+        return [0]
+    starts = list(range(0, size - tile + 1, stride))
+    if starts[-1] != size - tile:
+        starts.append(size - tile)
+    return starts
+
+
+def _feather_window(h, w):
+    """Separable Hann window (1, h, w) for seamless tile blending, floored above
+    zero so global edges keep full weight."""
+    wy = torch.hann_window(h, periodic=False).clamp(min=1e-3)
+    wx = torch.hann_window(w, periodic=False).clamp(min=1e-3)
+    return (wy[:, None] * wx[None, :]).unsqueeze(0)
+
+
+@torch.no_grad()
+def sr_upscale_tiled(rgbd, model, scheduler, factor=4, tile=224, overlap=32,
+                     num_inference_steps=100, device='cuda',
+                     color_correct=True, color_strength=1.0):
+    """Tile-based xN SR for maps too large to upscale in one pass.
+
+    Slides a `tile`x`tile` window (stride tile-overlap) over the input, super-
+    resolves each tile at the model's trained resolution, and feather-blends the
+    results into the full-size output. This both avoids the OOM of upscaling a
+    large map in one shot and keeps the SR model on-distribution (each tile is
+    ~224, the size it trained on). Color correction is applied per tile.
+
+    rgbd: (4, H, W) in [-1, 1]. Returns (4, factor*H, factor*W) in [-1, 1].
+    """
+    _, H, W = rgbd.shape
+    outH, outW = H * factor, W * factor
+    out = torch.zeros(4, outH, outW)
+    wsum = torch.zeros(1, outH, outW)
+    stride = max(tile - overlap, 1)
+
+    ys = _tile_starts(H, tile, stride)
+    xs = _tile_starts(W, tile, stride)
+    total = len(ys) * len(xs)
+    print(f"Tiled SR: {len(ys)}x{len(xs)} = {total} tiles "
+          f"({tile}px, overlap {overlap}) -> {outW}x{outH}")
+
+    n = 0
+    for y in ys:
+        for x in xs:
+            n += 1
+            th, tw = min(tile, H), min(tile, W)
+            crop = rgbd[:, y:y + th, x:x + tw]
+            sr_tile = sr_upscale_rgbd(crop, model, scheduler,
+                                      num_inference_steps=num_inference_steps,
+                                      factor=factor, device=device,
+                                      color_correct=color_correct,
+                                      color_strength=color_strength)
+            oh, ow = sr_tile.shape[-2:]
+            oy, ox = y * factor, x * factor
+            win = _feather_window(oh, ow)
+            out[:, oy:oy + oh, ox:ox + ow] += sr_tile * win
+            wsum[:, oy:oy + oh, ox:ox + ow] += win
+            print(f"  tile {n}/{total} done")
+
+    return out / wsum.clamp(min=1e-6)
+
+
 def _to_pil(tensor):
     """(3,H,W) or (H,W) tensor in [-1, 1] -> PIL image (RGB or grayscale-as-RGB)."""
     t = torch.clamp((tensor.detach().cpu() + 1.0) / 2.0, 0.0, 1.0)
@@ -188,6 +254,14 @@ def main():
     parser.add_argument("--color_strength", type=float, default=1.0,
                         help="Blend factor for color correction in [0, 1] (1.0 = full "
                              "correction, lower keeps more of the raw SR color).")
+    parser.add_argument("--tile", action="store_true",
+                        help="Tile the SR pass (224 windows, feather-blended) instead of "
+                             "upscaling the whole image at once. Use for large inputs that "
+                             "would OOM (e.g. a full-res photo or a stitched map).")
+    parser.add_argument("--tile_size", type=int, default=224,
+                        help="Tile window size for --tile (should match the training size).")
+    parser.add_argument("--tile_overlap", type=int, default=32,
+                        help="Overlap between tiles for --tile (feathered to hide seams).")
     parser.add_argument("--no_collage", action="store_true",
                         help="Skip the comparison collage (bilinear input | SR output "
                              "[| ground truth]), only write the standalone PNGs.")
@@ -207,11 +281,19 @@ def main():
     H, W = rgbd.shape[-2:]
     print(f"Upscaling {W}x{H} -> {W * args.factor}x{H * args.factor} "
           f"({args.num_inference_steps} steps)...")
-    sr = sr_upscale_rgbd(rgbd, model, scheduler,
-                         num_inference_steps=args.num_inference_steps,
-                         factor=args.factor, device=args.device,
-                         color_correct=not args.no_color_correct,
-                         color_strength=args.color_strength)
+    if args.tile:
+        sr = sr_upscale_tiled(rgbd, model, scheduler, factor=args.factor,
+                              tile=args.tile_size, overlap=args.tile_overlap,
+                              num_inference_steps=args.num_inference_steps,
+                              device=args.device,
+                              color_correct=not args.no_color_correct,
+                              color_strength=args.color_strength)
+    else:
+        sr = sr_upscale_rgbd(rgbd, model, scheduler,
+                             num_inference_steps=args.num_inference_steps,
+                             factor=args.factor, device=args.device,
+                             color_correct=not args.no_color_correct,
+                             color_strength=args.color_strength)
 
     stem = Path(args.input).stem + f"_sr{args.factor}x"
     rgb_path, depth_path, pt_path = save_rgbd_outputs(sr, args.output_dir, stem)
