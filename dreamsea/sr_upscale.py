@@ -21,6 +21,24 @@ from dreamsea.models import SRDDPM
 from dreamsea.generation_inpainting import _load_ddpm_checkpoint
 
 
+def load_rgbd_pt(path):
+    """Load a (4, H, W) RGBD .pt in the [-1, 1] convention the SR model expects.
+
+    Base-model patches are already [-1, 1], but preprocessed dataset tensors
+    (both the 224 base set and the full-res sr_rgbd set) are stored [0, 1]. We
+    auto-detect the latter by a non-negative minimum and rescale, so either kind
+    can be fed directly.
+    """
+    t = torch.load(path, map_location='cpu', weights_only=True).float()
+    while t.dim() > 3 and t.shape[0] == 1:
+        t = t.squeeze(0)
+    if t.dim() != 3 or t.shape[0] != 4:
+        raise ValueError(f"Expected a (4, H, W) RGBD tensor, got shape {tuple(t.shape)}")
+    if t.min() >= -0.01:          # stored [0, 1] -> match the [-1, 1] convention
+        t = t * 2.0 - 1.0
+    return t
+
+
 def load_sr_model(ckpt_path, device):
     model = SRDDPM().to(device)
     _load_ddpm_checkpoint(model, ckpt_path, device)
@@ -180,11 +198,7 @@ def main():
                              "and [-1, 1] range.")
     args = parser.parse_args()
 
-    rgbd = torch.load(args.input, map_location='cpu', weights_only=True).float()
-    while rgbd.dim() > 3 and rgbd.shape[0] == 1:
-        rgbd = rgbd.squeeze(0)
-    if rgbd.dim() != 3 or rgbd.shape[0] != 4:
-        raise ValueError(f"Expected a (4, H, W) RGBD tensor, got shape {tuple(rgbd.shape)}")
+    rgbd = load_rgbd_pt(args.input)
 
     print(f"Loading SR model from {args.sr_ckpt}...")
     model = load_sr_model(args.sr_ckpt, args.device)
@@ -214,11 +228,7 @@ def main():
         columns = [("bilinear input", lr_up), ("SR output", sr)]
 
         if args.reference:
-            ref = torch.load(args.reference, map_location='cpu', weights_only=True).float()
-            while ref.dim() > 3 and ref.shape[0] == 1:
-                ref = ref.squeeze(0)
-            if ref.min() >= -0.01:      # stored in [0, 1] -> match the [-1, 1] convention
-                ref = ref * 2.0 - 1.0
+            ref = load_rgbd_pt(args.reference)
             ref = F.interpolate(ref.unsqueeze(0), size=(out_h, out_w),
                                 mode='bilinear', align_corners=False)[0]
             columns.append(("ground truth", ref))

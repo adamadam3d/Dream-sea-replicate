@@ -20,19 +20,8 @@ import torch.nn.functional as F
 from PIL import Image, ImageDraw
 
 from dreamsea.sr_upscale import (load_sr_model, make_sr_scheduler,
-                                 sr_upscale_rgbd, match_color, _to_pil)
-
-
-def _load_rgbd(path):
-    """Load a (4, H, W) RGBD .pt as [-1, 1] (preprocessed files are stored [0, 1])."""
-    t = torch.load(path, map_location='cpu', weights_only=True).float()
-    while t.dim() > 3 and t.shape[0] == 1:
-        t = t.squeeze(0)
-    if t.dim() != 3 or t.shape[0] != 4:
-        raise ValueError(f"{path}: expected (4, H, W) RGBD, got {tuple(t.shape)}")
-    if t.min() >= -0.01:          # [0, 1] -> [-1, 1]
-        t = t * 2.0 - 1.0
-    return t
+                                 sr_upscale_rgbd, match_color, _to_pil,
+                                 load_rgbd_pt)
 
 
 def save_grid(rows, col_labels, channel, output_dir, stem, pad=6, label_h=20):
@@ -121,7 +110,7 @@ def main():
     rows = []
     for i, p in enumerate(picks):
         print(f"  [{i + 1}/{len(picks)}] {p.name}")
-        gt = _load_rgbd(p)
+        gt = load_rgbd_pt(p)
         base = F.interpolate(gt.unsqueeze(0), size=(args.patch_size, args.patch_size),
                              mode='area')[0]                     # simulated base patch
         sr_raw = sr_upscale_rgbd(base, model, scheduler,
