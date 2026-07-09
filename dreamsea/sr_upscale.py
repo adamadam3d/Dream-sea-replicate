@@ -14,7 +14,7 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn.functional as F
-from PIL import Image
+from PIL import Image, ImageDraw
 from diffusers import DDPMScheduler
 
 from dreamsea.models import SRDDPM
@@ -93,6 +93,39 @@ def sr_upscale_rgbd(rgbd, model, scheduler, num_inference_steps=100, factor=4,
     return out
 
 
+def _to_pil(tensor):
+    """(3,H,W) or (H,W) tensor in [-1, 1] -> PIL image (RGB or grayscale-as-RGB)."""
+    t = torch.clamp((tensor.detach().cpu() + 1.0) / 2.0, 0.0, 1.0)
+    arr = (t.numpy() * 255).astype(np.uint8)
+    if arr.ndim == 3:
+        return Image.fromarray(np.transpose(arr, (1, 2, 0)), mode='RGB')
+    return Image.fromarray(arr, mode='L').convert('RGB')
+
+
+def save_comparison_collage(columns, output_dir, stem, pad=6, label_h=20):
+    """Save a 2-row comparison collage: RGB on top, depth below, one column per
+    entry. `columns` is a list of (label, rgbd) with each rgbd a (4, H, W) tensor
+    in [-1, 1], all at the same H, W (the SR output resolution)."""
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    rgbs = [_to_pil(c[1][:3]) for c in columns]
+    depths = [_to_pil(c[1][3]) for c in columns]
+    w, h = rgbs[0].size
+    ncol = len(columns)
+
+    collage = Image.new('RGB', (ncol * w, 2 * h + label_h), (20, 20, 30))
+    draw = ImageDraw.Draw(collage)
+    for i, (label, _) in enumerate(columns):
+        draw.text((i * w + pad, pad), label, fill=(230, 230, 230))
+        collage.paste(rgbs[i], (i * w, label_h))
+        collage.paste(depths[i], (i * w, label_h + h))
+
+    path = output_dir / f"{stem}_collage.png"
+    collage.save(path)
+    return path
+
+
 def save_rgbd_outputs(rgbd, output_dir, stem):
     """Save a (4, H, W) [-1, 1] RGBD tensor as RGB png, depth png and a .pt."""
     output_dir = Path(output_dir)
@@ -137,6 +170,14 @@ def main():
     parser.add_argument("--color_strength", type=float, default=1.0,
                         help="Blend factor for color correction in [0, 1] (1.0 = full "
                              "correction, lower keeps more of the raw SR color).")
+    parser.add_argument("--no_collage", action="store_true",
+                        help="Skip the comparison collage (bilinear input | SR output "
+                             "[| ground truth]), only write the standalone PNGs.")
+    parser.add_argument("--reference", type=str, default=None,
+                        help="Optional path to a ground-truth HR RGBD .pt to add as a "
+                             "third collage column (e.g. the original image in a "
+                             "downsample->SR test). Auto-scaled to the output resolution "
+                             "and [-1, 1] range.")
     args = parser.parse_args()
 
     rgbd = torch.load(args.input, map_location='cpu', weights_only=True).float()
@@ -164,6 +205,27 @@ def main():
     print(f" - {rgb_path}")
     print(f" - {depth_path}")
     print(f" - {pt_path}")
+
+    if not args.no_collage:
+        out_h, out_w = sr.shape[-2:]
+        # The bilinear-upsampled input is the "before" reference at output size.
+        lr_up = F.interpolate(rgbd.unsqueeze(0), size=(out_h, out_w),
+                              mode='bilinear', align_corners=False)[0]
+        columns = [("bilinear input", lr_up), ("SR output", sr)]
+
+        if args.reference:
+            ref = torch.load(args.reference, map_location='cpu', weights_only=True).float()
+            while ref.dim() > 3 and ref.shape[0] == 1:
+                ref = ref.squeeze(0)
+            if ref.min() >= -0.01:      # stored in [0, 1] -> match the [-1, 1] convention
+                ref = ref * 2.0 - 1.0
+            ref = F.interpolate(ref.unsqueeze(0), size=(out_h, out_w),
+                                mode='bilinear', align_corners=False)[0]
+            columns.append(("ground truth", ref))
+
+        collage_path = save_comparison_collage(columns, args.output_dir, stem)
+        print(f" - {collage_path}  (RGB top / depth bottom, "
+              f"{len(columns)} columns)")
 
 
 if __name__ == "__main__":
