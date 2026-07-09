@@ -48,6 +48,7 @@ def generate_3dgs(cond_ckpt, uncond_ckpt, grid_size=3, roughness=0.5,
                   splat_scale=0.75, reference_cond=None, reference_spread=1.0,
                   latent_vector=None, sr_ckpt=None, sr_factor=4, sr_steps=100,
                   sr_color_correct=True, sr_color_strength=1.0,
+                  patch_size=224, redilate=False, redilation_fraction=0.5,
                   device='cuda' if torch.cuda.is_available() else 'cpu'):
     """
     Full pipeline to generate a 3DGS scene from trained checkpoints.
@@ -153,10 +154,12 @@ def generate_3dgs(cond_ckpt, uncond_ckpt, grid_size=3, roughness=0.5,
     # 3. Generate and Stitch RGBD Patches
     print("\n--- 3. Generating and Stitching RGBD Patches ---")
     # This uses the conditional model to generate patches and unconditional to inpaint seams
-    patch_grid = generator.generate_grid(latent_grid)
+    patch_grid = generator.generate_grid(latent_grid, patch_size=patch_size,
+                                         redilate=redilate,
+                                         redilation_fraction=redilation_fraction)
     global_map = generator.stitch_and_inpaint(
-        patch_grid, 
-        overlap_size=32, 
+        patch_grid,
+        overlap_size=32,
         latent_grid=latent_grid, 
         use_conditional=use_conditional_stitching
     )
@@ -245,7 +248,7 @@ def generate_3dgs(cond_ckpt, uncond_ckpt, grid_size=3, roughness=0.5,
     positions, colors, conds = gs_opt.create_point_cloud_from_rgbd(
         global_map, 
         latent_grid=latent_grid, 
-        patch_size=int(224 * upscale_factor), 
+        patch_size=int(patch_size * upscale_factor),
         overlap_size=int(32 * upscale_factor)
     )
     print(f"Extracted {positions.shape[0]} points from map.")
@@ -288,7 +291,7 @@ def generate_3dgs(cond_ckpt, uncond_ckpt, grid_size=3, roughness=0.5,
             # matches the prior; the per-view condition is the latent at the
             # framed point, which is now coherent with what is in frame.
             from dreamsea.gs_sds_optimization_v2 import optimize_3dgs_sds_multiview
-            patch_px = 224 * upscale_factor
+            patch_px = patch_size * upscale_factor
             frame_fraction = min(patch_px / global_map.shape[2], 1.0)
             optimize_3dgs_sds_multiview(
                 model=gs_model,
@@ -385,6 +388,18 @@ if __name__ == "__main__":
                              "removes the diffusion-SR hue drift).")
     parser.add_argument("--sr_color_strength", type=float, default=1.0,
                         help="Blend factor for SR color correction in [0, 1].")
+    parser.add_argument("-P", "--patch_size", type=int, default=224,
+                        help="Per-patch generation resolution (must be divisible by 32). "
+                             "Default 224 (the trained size). Larger values give more detail "
+                             "per patch before stitching/SR, at ~quadratic VRAM/time cost; "
+                             "pair with --redilate above 224 to avoid repeated-tile artifacts.")
+    parser.add_argument("--redilate", action="store_true",
+                        help="Apply ScaleCrafter re-dilation during patch generation when "
+                             "--patch_size > 224 (scales the convs' receptive field so the "
+                             "larger patch keeps a coherent global layout). Off by default.")
+    parser.add_argument("--redilation_fraction", type=float, default=0.5,
+                        help="Fraction of denoising steps (from the noisiest) run with dilated "
+                             "convs. Higher = more coherent layout, lower = sharper texture.")
     parser.add_argument("-k", "--splat_scale", type=float, default=0.75,
                         help="Initial Gaussian size as a multiple of the inter-point spacing. "
                              "Lower = sharper texture (risk of pinholes on steep slopes), "
@@ -446,5 +461,8 @@ if __name__ == "__main__":
         sr_steps=args.sr_steps,
         sr_color_correct=not args.no_sr_color_correct,
         sr_color_strength=args.sr_color_strength,
+        patch_size=args.patch_size,
+        redilate=args.redilate,
+        redilation_fraction=args.redilation_fraction,
         device=args.device
     )

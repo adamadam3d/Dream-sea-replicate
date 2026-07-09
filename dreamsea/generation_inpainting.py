@@ -179,19 +179,27 @@ class GeneratorInpainter:
 
         return image.cpu().numpy() # (1, 4, patch_size, patch_size)
 
-    def generate_grid(self, latent_grid):
+    def generate_grid(self, latent_grid, patch_size=224, redilate=False,
+                      redilation_fraction=0.5):
         """
         Inference loop iterating over fractal latent grid.
         latent_grid is (N, N, 2).
         Returns a grid of generated patches.
+
+        patch_size: per-patch resolution (default 224, the trained size). Larger
+            values sample the conv UNet off-distribution for more detail per patch;
+            pair with redilate to avoid repeated-tile artifacts above 224.
         """
         N = latent_grid.shape[0]
-        patch_grid = np.zeros((N, N, 4, 224, 224), dtype=np.float32)
+        patch_grid = np.zeros((N, N, 4, patch_size, patch_size), dtype=np.float32)
 
-        print(f"Generating {N}x{N} grid patches...")
+        rd = " (re-dilated)" if redilate and patch_size > 224 else ""
+        print(f"Generating {N}x{N} grid patches at {patch_size}px{rd}...")
         for y in range(N):
             for x in range(N):
-                patch = self.generate_patch(latent_grid[y, x])
+                patch = self.generate_patch(latent_grid[y, x], patch_size=patch_size,
+                                            redilate=redilate,
+                                            redilation_fraction=redilation_fraction)
                 patch_grid[y, x] = patch[0]
 
         return patch_grid
@@ -319,7 +327,10 @@ class GeneratorInpainter:
         to preserve latent control accuracy.
         """
         N = patch_grid.shape[0]
-        patch_size = 224
+        # Derive the patch size from the generated patches so stitching + seam
+        # inpainting follow whatever resolution generate_grid produced (224 by
+        # default, larger when a bigger patch_size was requested).
+        patch_size = patch_grid.shape[-1]
 
         # Calculate final canvas size
         canvas_size = N * patch_size - (N - 1) * overlap_size
