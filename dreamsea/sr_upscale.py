@@ -28,10 +28,54 @@ def load_sr_model(ckpt_path, device):
     return model
 
 
+def make_sr_scheduler(ckpt_path):
+    """Build a DDPMScheduler matching how the checkpoint was trained.
+
+    Reads the zero-terminal-SNR / prediction-type flags train.py records in the
+    checkpoint and rebuilds the same schedule for sampling (v-prediction +
+    rescaled betas + trailing spacing). Older checkpoints without those keys fall
+    back to the legacy epsilon/linear schedule, so nothing changes for them.
+    """
+    meta = torch.load(ckpt_path, map_location='cpu', weights_only=False)
+    ztsnr = isinstance(meta, dict) and bool(meta.get('zero_terminal_snr', False))
+    kwargs = dict(num_train_timesteps=1000)
+    if ztsnr:
+        kwargs.update(rescale_betas_zero_snr=True, prediction_type="v_prediction",
+                      timestep_spacing="trailing")
+        print("Checkpoint trained with zero-terminal-SNR: using v-prediction sampler.")
+    return DDPMScheduler(**kwargs)
+
+
+def match_color(sr, ref, strength=1.0):
+    """Cancel diffusion-SR hue drift by matching each channel's mean/std to the
+    low-res condition (StableSR/Real-ESRGAN-style AdaIN color correction).
+
+    ε-prediction DDPMs under-fit the low-frequency (mean color) component, so the
+    SR output drifts toward the training-set color prior — for underwater data
+    that shows up as a blue cast. `ref` is the bilinear-upsampled LR at the same
+    resolution as `sr`; it carries the correct hue, so we re-impose its per-channel
+    statistics while keeping the diffusion model's high-frequency detail. Depth
+    (channel 3) is matched too, which also stabilizes its overall level.
+
+    sr, ref: (4, H, W) in [-1, 1]. strength in [0, 1] blends toward the correction.
+    """
+    out = sr.clone()
+    for c in range(sr.shape[0]):
+        s_mean, s_std = sr[c].mean(), sr[c].std()
+        r_mean, r_std = ref[c].mean(), ref[c].std()
+        corrected = (sr[c] - s_mean) / (s_std + 1e-6) * r_std + r_mean
+        out[c] = sr[c] + strength * (corrected - sr[c])
+    return out
+
+
 @torch.no_grad()
 def sr_upscale_rgbd(rgbd, model, scheduler, num_inference_steps=100, factor=4,
-                    device='cuda'):
-    """rgbd: (4, H, W) tensor in [-1, 1]. Returns (4, factor*H, factor*W) in [-1, 1]."""
+                    device='cuda', color_correct=True, color_strength=1.0):
+    """rgbd: (4, H, W) tensor in [-1, 1]. Returns (4, factor*H, factor*W) in [-1, 1].
+
+    color_correct: re-impose the LR condition's per-channel mean/std on the output
+        to remove diffusion-SR hue drift (the blue cast). See match_color.
+    """
     lr = rgbd.unsqueeze(0).float().to(device)
     H, W = lr.shape[-2:]
     lr_up = F.interpolate(lr, size=(H * factor, W * factor),
@@ -42,7 +86,11 @@ def sr_upscale_rgbd(rgbd, model, scheduler, num_inference_steps=100, factor=4,
     for t in scheduler.timesteps:
         noise_pred = model(torch.cat([image, lr_up], dim=1), t)
         image = scheduler.step(noise_pred, t, image).prev_sample
-    return image[0].cpu()
+
+    out = image[0].cpu()
+    if color_correct:
+        out = match_color(out, lr_up[0].cpu(), strength=color_strength)
+    return out
 
 
 def save_rgbd_outputs(rgbd, output_dir, stem):
@@ -82,6 +130,13 @@ def main():
     parser.add_argument("-d", "--device", type=str,
                         default="cuda" if torch.cuda.is_available() else "cpu",
                         help="Compute device.")
+    parser.add_argument("--no_color_correct", action="store_true",
+                        help="Disable AdaIN color correction. By default the output's "
+                             "per-channel mean/std are matched to the LR condition to "
+                             "remove diffusion-SR hue drift (the blue cast).")
+    parser.add_argument("--color_strength", type=float, default=1.0,
+                        help="Blend factor for color correction in [0, 1] (1.0 = full "
+                             "correction, lower keeps more of the raw SR color).")
     args = parser.parse_args()
 
     rgbd = torch.load(args.input, map_location='cpu', weights_only=True).float()
@@ -92,14 +147,16 @@ def main():
 
     print(f"Loading SR model from {args.sr_ckpt}...")
     model = load_sr_model(args.sr_ckpt, args.device)
-    scheduler = DDPMScheduler(num_train_timesteps=1000)
+    scheduler = make_sr_scheduler(args.sr_ckpt)
 
     H, W = rgbd.shape[-2:]
     print(f"Upscaling {W}x{H} -> {W * args.factor}x{H * args.factor} "
           f"({args.num_inference_steps} steps)...")
     sr = sr_upscale_rgbd(rgbd, model, scheduler,
                          num_inference_steps=args.num_inference_steps,
-                         factor=args.factor, device=args.device)
+                         factor=args.factor, device=args.device,
+                         color_correct=not args.no_color_correct,
+                         color_strength=args.color_strength)
 
     stem = Path(args.input).stem + f"_sr{args.factor}x"
     rgb_path, depth_path, pt_path = save_rgbd_outputs(sr, args.output_dir, stem)

@@ -82,11 +82,11 @@ def main():
     sr_model = None
     sr_scheduler = None
     if args.sr_ckpt:
-        from diffusers import DDPMScheduler
-        from dreamsea.sr_upscale import load_sr_model, sr_upscale_rgbd, save_rgbd_outputs
+        from dreamsea.sr_upscale import (load_sr_model, sr_upscale_rgbd,
+                                          save_rgbd_outputs, make_sr_scheduler)
         print(f"Loading SR stage from: {args.sr_ckpt}")
         sr_model = load_sr_model(args.sr_ckpt, args.device)
-        sr_scheduler = DDPMScheduler(num_train_timesteps=1000)
+        sr_scheduler = make_sr_scheduler(args.sr_ckpt)
 
     all_rgb_images = []
     all_depth_images = []

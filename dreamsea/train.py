@@ -148,13 +148,14 @@ def generate_samples_during_training(model, epoch, output_dir, device, model_typ
     return str(rgb_path), str(depth_path)
 
 def generate_sr_samples_during_training(model, dataset, epoch, output_dir, device,
-                                         num_samples=4, num_inference_steps=250):
+                                         num_samples=4, num_inference_steps=250,
+                                         zero_terminal_snr=False):
     """Visual check for the SR model: one row per sample, laid out as
     [bilinear x4 input | SR output | ground-truth HR]."""
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    scheduler = DDPMScheduler(num_train_timesteps=1000)
+    scheduler = make_noise_scheduler(zero_terminal_snr, sampling=True)
     scheduler.set_timesteps(num_inference_steps=num_inference_steps)
     model.eval()
 
@@ -195,13 +196,41 @@ def generate_sr_samples_during_training(model, dataset, epoch, output_dir, devic
     return str(rgb_path), str(depth_path)
 
 
-def build_checkpoint(epoch, unwrapped_model, optimizer, ema_model=None):
+def make_noise_scheduler(zero_terminal_snr=False, sampling=False):
+    """Build the DDPM scheduler.
+
+    With zero_terminal_snr we follow Lin et al., "Common Diffusion Noise Schedules
+    and Sample Steps Are Flawed": rescale the betas so the final timestep has truly
+    zero signal-to-noise ratio and switch to v-prediction (epsilon-prediction is
+    undefined at zero SNR). This removes the random per-sample global color /
+    brightness drift (the yellow/blue/red tint), because the leaked low-frequency
+    signal that biased the mean is eliminated. Sampling additionally uses
+    'trailing' timestep spacing so the zero-SNR terminal step is actually visited.
+
+    The default (zero_terminal_snr=False) reproduces the legacy epsilon/linear
+    schedule, so existing checkpoints are unaffected.
+    """
+    kwargs = dict(num_train_timesteps=1000)
+    if zero_terminal_snr:
+        kwargs.update(rescale_betas_zero_snr=True, prediction_type="v_prediction")
+        if sampling:
+            kwargs.update(timestep_spacing="trailing")
+    return DDPMScheduler(**kwargs)
+
+
+def build_checkpoint(epoch, unwrapped_model, optimizer, ema_model=None,
+                     zero_terminal_snr=False):
     """Assemble a checkpoint dict with raw weights, optimizer state and, when EMA
     is enabled, a named EMA state dict that inference loaders can use directly."""
     ckpt = {
         'epoch': epoch,
         'model_state_dict': unwrapped_model.state_dict(),
         'optimizer_state_dict': optimizer.state_dict(),
+        # Record how the noise schedule was set up so inference can build a
+        # matching sampler (v-prediction + zero-terminal-SNR need the same
+        # scheduler config at sampling time or the output is garbage).
+        'zero_terminal_snr': zero_terminal_snr,
+        'prediction_type': 'v_prediction' if zero_terminal_snr else 'epsilon',
     }
     if ema_model is not None:
         # EMAModel only tracks parameters, in parameters() order. Overlay the
@@ -318,7 +347,7 @@ def train_ddpm(data_dir, model_type='conditional', epochs=500, batch_size=16,
                device='cuda' if torch.cuda.is_available() else 'cpu', multi_gpu=False,
                learning_rate=1e-4, gradient_accumulation_steps=1, mixed_precision='fp16',
                gradient_checkpointing=False, ntfy_topic=None, ema_decay=0.9999,
-               cond_dropout_prob=0.0):
+               cond_dropout_prob=0.0, zero_terminal_snr=False):
     """
     Training loop for DDPM models using preprocessed data.
     """
@@ -378,7 +407,10 @@ def train_ddpm(data_dir, model_type='conditional', epochs=500, batch_size=16,
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=True,
                             num_workers=4, pin_memory=True, persistent_workers=True)
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
-    noise_scheduler = DDPMScheduler(num_train_timesteps=1000)
+    noise_scheduler = make_noise_scheduler(zero_terminal_snr)
+    if zero_terminal_snr:
+        accelerator.print("Zero-terminal-SNR enabled: using v-prediction + rescaled betas "
+                          "(Lin et al.) to remove global color/brightness drift.")
 
     # Prepare everything with accelerator
     model, optimizer, dataloader = accelerator.prepare(model, optimizer, dataloader)
@@ -538,8 +570,14 @@ def train_ddpm(data_dir, model_type='conditional', epochs=500, batch_size=16,
                     else:
                         noise_pred = model(noisy_images, timesteps)
                     
-                    # Compute loss
-                    loss = F.mse_loss(noise_pred, noise)
+                    # Compute loss. Under v-prediction (zero-terminal-SNR) the
+                    # model's target is the velocity, not the raw noise; otherwise
+                    # the two are identical to the legacy epsilon objective.
+                    if noise_scheduler.config.prediction_type == "v_prediction":
+                        target = noise_scheduler.get_velocity(clean_images, noise, timesteps)
+                    else:
+                        target = noise
+                    loss = F.mse_loss(noise_pred, target)
                     
                     # NaN loss detection: skip this batch to prevent poisoning the optimizer state
                     if torch.isnan(loss) or torch.isinf(loss):
@@ -621,7 +659,8 @@ def train_ddpm(data_dir, model_type='conditional', epochs=500, batch_size=16,
                     # Unwrap model before saving to ensure clean state dict
                     unwrapped_model = accelerator.unwrap_model(model)
                     torch.save(
-                        build_checkpoint(epoch + 1, unwrapped_model, optimizer, ema_model),
+                        build_checkpoint(epoch + 1, unwrapped_model, optimizer, ema_model,
+                                         zero_terminal_snr=zero_terminal_snr),
                         checkpoint_path
                     )
                     print(f"--> Saved checkpoint: {checkpoint_path}")
@@ -635,7 +674,8 @@ def train_ddpm(data_dir, model_type='conditional', epochs=500, batch_size=16,
                             ema_model.copy_to(unwrapped_model.parameters())
                         if model_type == 'sr':
                             rgb_collage, depth_collage = generate_sr_samples_during_training(
-                                unwrapped_model, dataset, epoch + 1, sample_dir, accelerator.device
+                                unwrapped_model, dataset, epoch + 1, sample_dir, accelerator.device,
+                                zero_terminal_snr=zero_terminal_snr
                             )
                         else:
                             rgb_collage, depth_collage = generate_samples_during_training(
@@ -667,7 +707,8 @@ def train_ddpm(data_dir, model_type='conditional', epochs=500, batch_size=16,
         if accelerator.is_main_process:
             unwrapped_model = accelerator.unwrap_model(model)
             torch.save(
-                build_checkpoint(current_epoch, unwrapped_model, optimizer, ema_model),
+                build_checkpoint(current_epoch, unwrapped_model, optimizer, ema_model,
+                                 zero_terminal_snr=zero_terminal_snr),
                 checkpoint_path
             )
             print(f"--> Saved interrupted checkpoint: {checkpoint_path}")
@@ -713,6 +754,12 @@ if __name__ == "__main__":
                              "the [0,0] condition a clean mean-attractor while weakly-used real conditions "
                              "degrade — forcing the model to always use the condition gives stronger type "
                              "control. Set >0 only if you intend to use CFG. Ignored for the unconditional model.")
+    parser.add_argument("-z", "--zero_terminal_snr", action="store_true",
+                        help="Enable zero-terminal-SNR training (Lin et al.): rescale the betas so the "
+                             "final timestep has zero SNR and switch to v-prediction. Removes the random "
+                             "per-sample global color/brightness drift (yellow/blue/red tint) at the source, "
+                             "so no inference color-correction is needed. Off by default; requires training "
+                             "a fresh checkpoint (config is recorded in the checkpoint for inference).")
 
     args = parser.parse_args()
 
@@ -733,7 +780,8 @@ if __name__ == "__main__":
             gradient_checkpointing=args.gradient_checkpointing,
             ntfy_topic=args.ntfy_topic,
             ema_decay=args.ema_decay,
-            cond_dropout_prob=args.cond_dropout_prob
+            cond_dropout_prob=args.cond_dropout_prob,
+            zero_terminal_snr=args.zero_terminal_snr
         )
     except Exception as e:
         error_msg = f"{type(e).__name__}: {e}"
