@@ -110,10 +110,21 @@ def render_rgbd(rasterization, model, viewmat, K, H=224, W=224, rgb_only=False):
     colors01 = (torch.tanh(model.features_dc) + 1.0) / 2.0   # (N,3) -> [0,1]
 
     mode = "RGB" if rgb_only else "RGB+ED"
-    out, _alphas, _meta = rasterization(
-        means, quats, scales, opacities, colors01,
-        viewmat[None], K[None], W, H, render_mode=mode,
-    )                                                        # out: (1, H, W, 3) or (1, H, W, 4)
+    # rasterize_mode="antialiased" is Mip-Splatting's 2D filter: without it the
+    # classic rasterizer erodes degenerate (thin/subpixel) splats, opening false
+    # pinholes between the flat surfel discs the init produces.
+    try:
+        out, _alphas, _meta = rasterization(
+            means, quats, scales, opacities, colors01,
+            viewmat[None], K[None], W, H, render_mode=mode,
+            rasterize_mode="antialiased",
+        )                                                    # out: (1, H, W, 3) or (1, H, W, 4)
+    except TypeError:
+        # Older gsplat without rasterize_mode support.
+        out, _alphas, _meta = rasterization(
+            means, quats, scales, opacities, colors01,
+            viewmat[None], K[None], W, H, render_mode=mode,
+        )
 
     rgb = out[0, ..., :3].permute(2, 0, 1)                   # (3,H,W) in [0,1]
     if rgb_only:
@@ -320,3 +331,157 @@ def optimize_3dgs_sds_multiview(model, diffusion_model, scheduler, iterations=10
             print(f"  Iter {i + 1}/{iterations} | SDS surrogate: {loss.item():.4f}")
 
     print("Multi-view SDS optimization complete.")
+
+
+# --------------------------------------------------------------------------- #
+# Alpha-driven hole densification (SplaTAM-style)                              #
+# --------------------------------------------------------------------------- #
+def _flood_from_border(mask):
+    """Pixels of boolean `mask` (H, W) 4-connected to the image border."""
+    reach = np.zeros_like(mask)
+    reach[0, :] = mask[0, :]
+    reach[-1, :] = mask[-1, :]
+    reach[:, 0] = mask[:, 0]
+    reach[:, -1] = mask[:, -1]
+    while True:
+        grown = reach.copy()
+        grown[1:, :] |= reach[:-1, :]
+        grown[:-1, :] |= reach[1:, :]
+        grown[:, 1:] |= reach[:, :-1]
+        grown[:, :-1] |= reach[:, 1:]
+        grown &= mask
+        if (grown == reach).all():
+            return reach
+        reach = grown
+
+
+def _box3_sum(a):
+    """Sum over the 3x3 neighborhood (zero-padded). a: (H, W) or (H, W, C)."""
+    pad = ((1, 1), (1, 1)) + ((0, 0),) * (a.ndim - 2)
+    p = np.pad(a, pad, mode='constant')
+    return sum(p[1 + dy:p.shape[0] - 1 + dy, 1 + dx:p.shape[1] - 1 + dx]
+               for dy in (-1, 0, 1) for dx in (-1, 0, 1))
+
+
+def _diffuse_fill(depth, rgb, known, need, iters=64):
+    """Fill `depth` (H,W) and `rgb` (H,W,3) inside `need` by iterative 3x3
+    neighbor averaging from `known` pixels. Returns (depth, rgb, filled_mask)."""
+    w = known.astype(np.float32)
+    d = np.where(known, depth, 0.0).astype(np.float32)
+    c = np.where(known[..., None], rgb, 0.0).astype(np.float32)
+    remaining = need & ~known
+    for _ in range(iters):
+        if not remaining.any():
+            break
+        ws = _box3_sum(w)
+        newly = remaining & (ws > 0)
+        if not newly.any():
+            break
+        ds = _box3_sum(d)
+        cs = _box3_sum(c)
+        d[newly] = ds[newly] / ws[newly]
+        c[newly] = cs[newly] / ws[newly][..., None]
+        w[newly] = 1.0
+        remaining &= ~newly
+    return d, c, need & ~remaining
+
+
+@torch.no_grad()
+def densify_holes(model, views=30, fov_deg=60.0, H=224, W=224, alpha_thresh=0.5,
+                  elev_min=60.0, frame_extent=None, splat_scale=1.5,
+                  max_new_per_view=20000):
+    """
+    SplaTAM-style hole closing: render accumulated alpha from random near-nadir
+    views; interior pixels where alpha < alpha_thresh are holes in the splat
+    cloud. Their depth/color are diffused in from the surrounding covered
+    pixels, unprojected to world space, and inserted as new isotropic Gaussians.
+
+    Interior-only: hole pixels 4-connected to the image border are background
+    (the terrain does not fill the frame there), not holes, and are skipped.
+
+    Call BEFORE building any optimizer over the model parameters (add_gaussians
+    re-creates them). Returns the number of Gaussians added.
+    """
+    try:
+        from gsplat import rasterization
+    except ImportError as e:
+        raise ImportError("gsplat is required for hole densification.") from e
+
+    device = model.positions.device
+    K = intrinsics(fov_deg, W, H, device)
+    f = K[0, 0].item()
+    cx, cy = K[0, 2].item(), K[1, 2].item()
+    total_new = 0
+
+    for v in range(views):
+        target_idx = np.random.randint(0, model.positions.shape[0])
+        vm = sample_topdown_camera(model.positions, target=model.positions[target_idx],
+                                   fov_deg=fov_deg, device=device,
+                                   elev_min=elev_min, frame_extent=frame_extent)
+
+        means = model.positions
+        quats = torch.nn.functional.normalize(model.rotation, dim=-1)
+        scales = torch.exp(model.scaling)
+        opac = torch.sigmoid(model.opacity).squeeze(-1)
+        cols = (torch.tanh(model.features_dc) + 1.0) / 2.0
+        try:
+            out, alphas, _ = rasterization(means, quats, scales, opac, cols,
+                                           vm[None], K[None], W, H,
+                                           render_mode="RGB+ED",
+                                           rasterize_mode="antialiased")
+        except TypeError:
+            out, alphas, _ = rasterization(means, quats, scales, opac, cols,
+                                           vm[None], K[None], W, H,
+                                           render_mode="RGB+ED")
+
+        rgb = out[0, ..., :3].clamp(0, 1).cpu().numpy()
+        depth = out[0, ..., 3].cpu().numpy()
+        alpha = alphas[0, ..., 0].cpu().numpy()
+
+        covered = alpha >= alpha_thresh
+        hole = ~covered
+        interior = hole & ~_flood_from_border(hole)
+        if not interior.any():
+            continue
+
+        depth_f, rgb_f, filled = _diffuse_fill(depth, rgb, covered, interior)
+        ys, xs = np.nonzero(interior & filled)
+        if len(ys) == 0:
+            continue
+        if len(ys) > max_new_per_view:
+            keep = np.random.choice(len(ys), max_new_per_view, replace=False)
+            ys, xs = ys[keep], xs[keep]
+
+        d = depth_f[ys, xs]
+        ok = d > 1e-3
+        ys, xs, d = ys[ok], xs[ok], d[ok]
+        if len(ys) == 0:
+            continue
+
+        # Unproject to world: p_cam = R p_w + t  ->  p_w = R^T (p_cam - t)
+        p_cam = np.stack([(xs - cx) * d / f, (ys - cy) * d / f, d], axis=-1)
+        R = vm[:3, :3].cpu().numpy()
+        t = vm[:3, 3].cpu().numpy()
+        p_world = (p_cam - t) @ R
+
+        colors = rgb_f[ys, xs]
+        s = (d / f * splat_scale).astype(np.float32)
+        new_scales = np.stack([s, s, s], axis=-1)
+        new_quats = np.zeros((len(ys), 4), dtype=np.float32)
+        new_quats[:, 0] = 1.0
+
+        # Inherit the SDS conditioning of the nearest existing Gaussian so the
+        # new points don't drag views toward the dataset-mean condition.
+        n_exist = model.positions.shape[0]
+        sub = torch.randint(0, n_exist, (min(n_exist, 100_000),), device=device)
+        pw_t = torch.as_tensor(p_world, dtype=torch.float32, device=device)
+        nn_idx = torch.cdist(pw_t, model.positions[sub]).argmin(dim=1)
+        conds = model.point_conds[sub[nn_idx]].cpu().numpy()
+
+        model.add_gaussians(p_world, colors, new_scales, new_quats, conds=conds)
+        total_new += len(ys)
+        print(f"  densify view {v + 1}/{views}: +{len(ys)} Gaussians "
+              f"(total +{total_new})")
+
+    print(f"Hole densification complete: {total_new} Gaussians added.")
+    return total_new

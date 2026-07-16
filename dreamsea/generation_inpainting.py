@@ -320,13 +320,60 @@ class GeneratorInpainter:
 
         return x_t.cpu().numpy()
 
-    def stitch_and_inpaint(self, patch_grid, overlap_size=32, latent_grid=None, use_conditional=False):
+    @staticmethod
+    def _align_patch_depths(patch_grid, overlap_size):
+        """
+        Per-patch depth alignment before stitching. Each patch's depth channel
+        comes out of the DDPM with its own arbitrary scale/offset; averaging
+        disagreeing depths in the overlap leaves seam steps that unproject into
+        cliffs (and holes) in the 3DGS stage. Greedily (scan order) fit
+        depth' = a * depth + b per patch by least squares against the
+        already-aligned left/top neighbors' overlap bands.
+        """
+        N = patch_grid.shape[0]
+        P = patch_grid.shape[-1]
+        ov = overlap_size
+        pg = patch_grid.copy()
+        for y in range(N):
+            for x in range(N):
+                if x == 0 and y == 0:
+                    continue
+                src, ref = [], []
+                if x > 0:
+                    src.append(pg[y, x, 3, :, :ov].ravel())
+                    ref.append(pg[y, x - 1, 3, :, P - ov:].ravel())
+                if y > 0:
+                    src.append(pg[y, x, 3, :ov, :].ravel())
+                    ref.append(pg[y - 1, x, 3, P - ov:, :].ravel())
+                s = np.concatenate(src)
+                r = np.concatenate(ref)
+                var = s.var()
+                if var < 1e-8:
+                    a, b = 1.0, float(r.mean() - s.mean())
+                else:
+                    a = float(((s - s.mean()) * (r - r.mean())).mean() / var)
+                    # A gain far from 1 means the overlaps genuinely disagree in
+                    # content, not just in calibration — don't warp the patch.
+                    a = float(np.clip(a, 0.5, 2.0))
+                    b = float(r.mean() - a * s.mean())
+                pg[y, x, 3] = np.clip(a * pg[y, x, 3] + b, -1.0, 1.0)
+        return pg
+
+    def stitch_and_inpaint(self, patch_grid, overlap_size=32, latent_grid=None, use_conditional=False,
+                           align_depth=True):
         """
         Takes the generated patches and stitches them into a dense RGBD map.
         Uses a parallelizable inpainting pattern with RePaint to handle seams/overlaps
         to preserve latent control accuracy.
+
+        align_depth: least-squares scale/offset alignment of each patch's depth
+        channel to its already-placed neighbors before blending (removes seam
+        steps caused by per-patch relative depth).
         """
         N = patch_grid.shape[0]
+        if align_depth and N > 1:
+            print("Aligning per-patch depth scale/offset over overlap bands...")
+            patch_grid = self._align_patch_depths(patch_grid, overlap_size)
         # Derive the patch size from the generated patches so stitching + seam
         # inpainting follow whatever resolution generate_grid produced (224 by
         # default, larger when a bigger patch_size was requested).

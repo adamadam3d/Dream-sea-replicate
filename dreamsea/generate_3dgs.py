@@ -45,7 +45,8 @@ def generate_3dgs(cond_ckpt, uncond_ckpt, grid_size=3, roughness=0.5,
                   sds_rgbd=False, sds_anchor=1.0,
                   latent_stats_path=None, use_conditional_stitching=False,
                   rasterizer="gsplat", save_init_ply=False, upscale_factor=1.0,
-                  splat_scale=0.75, surfel_init=True,
+                  splat_scale=0.75, surfel_init=True, relief=10.0,
+                  densify_views=30, align_depth=True,
                   reference_cond=None, reference_spread=1.0,
                   latent_vector=None, sr_ckpt=None, sr_factor=4, sr_steps=100,
                   sr_color_correct=True, sr_color_strength=1.0,
@@ -161,8 +162,9 @@ def generate_3dgs(cond_ckpt, uncond_ckpt, grid_size=3, roughness=0.5,
     global_map = generator.stitch_and_inpaint(
         patch_grid,
         overlap_size=32,
-        latent_grid=latent_grid, 
-        use_conditional=use_conditional_stitching
+        latent_grid=latent_grid,
+        use_conditional=use_conditional_stitching,
+        align_depth=align_depth
     )
     
     # Save the global RGBD map for inspection
@@ -247,10 +249,11 @@ def generate_3dgs(cond_ckpt, uncond_ckpt, grid_size=3, roughness=0.5,
     # 4. Initialize 3D Gaussian Splatting
     print("\n--- 4. Initializing 3D Gaussian Splatting ---")
     positions, colors, conds = gs_opt.create_point_cloud_from_rgbd(
-        global_map, 
-        latent_grid=latent_grid, 
+        global_map,
+        latent_grid=latent_grid,
         patch_size=int(patch_size * upscale_factor),
-        overlap_size=int(32 * upscale_factor)
+        overlap_size=int(32 * upscale_factor),
+        relief=relief
     )
     print(f"Extracted {positions.shape[0]} points from map.")
 
@@ -269,7 +272,8 @@ def generate_3dgs(cond_ckpt, uncond_ckpt, grid_size=3, roughness=0.5,
     # isotropic splats leave on steep slopes without blurring flat terrain.
     init_scales, init_quats = (None, None)
     if surfel_init:
-        init_scales, init_quats = gs_opt.compute_surfel_init(global_map, splat_scale=splat_scale)
+        init_scales, init_quats = gs_opt.compute_surfel_init(global_map, splat_scale=splat_scale,
+                                                             relief=relief)
         print("Using surfel (slope-aware anisotropic) initialization.")
 
     gs_model = gs_opt.GaussianSplattingModel(positions, colors, point_cloud_conds=conds,
@@ -279,6 +283,21 @@ def generate_3dgs(cond_ckpt, uncond_ckpt, grid_size=3, roughness=0.5,
                                              init_scales=init_scales, init_quats=init_quats,
                                              device=device)
     print("3DGS model initialized.")
+
+    # Alpha-driven hole densification (SplaTAM-style): render silhouettes from
+    # random near-nadir views and insert Gaussians wherever interior coverage
+    # drops out. Runs BEFORE the init PLY save and before SDS builds its
+    # optimizer (add_gaussians re-creates the parameters).
+    if densify_views > 0 and rasterizer == "gsplat":
+        print(f"\n--- 4b. Hole densification ({densify_views} views) ---")
+        from dreamsea.gs_sds_optimization_v2 import densify_holes
+        patch_px = patch_size * upscale_factor
+        frame_fraction = min(patch_px / global_map.shape[2], 1.0)
+        scene_extent = (gs_model.positions.max(0).values - gs_model.positions.min(0).values).norm()
+        densify_holes(gs_model, views=densify_views,
+                      frame_extent=(scene_extent * frame_fraction).item())
+    elif densify_views > 0:
+        print("Skipping hole densification (requires --rasterizer gsplat).")
 
     # Save initial PLY before SDS optimization if requested
     if save_init_ply:
@@ -416,6 +435,18 @@ if __name__ == "__main__":
                              "Lower = sharper texture (risk of pinholes on steep slopes), "
                              "higher = smoother/safer coverage. 0.75 keeps the surface "
                              "hole-free without blurring the RGBD map.")
+    parser.add_argument("--relief", type=float, default=10.0,
+                        help="Vertical relief multiplier mapping the [0,1] depth channel to world "
+                             "z (z = depth*relief + 1). The historical value is 10; lower values "
+                             "(3-5) give gentler slopes and markedly fewer pinholes.")
+    parser.add_argument("--densify_views", type=int, default=30,
+                        help="Number of random near-nadir views for alpha-driven hole "
+                             "densification (SplaTAM-style: insert Gaussians wherever interior "
+                             "silhouette coverage drops out). 0 disables. Requires --rasterizer "
+                             "gsplat.")
+    parser.add_argument("--no_align_depth", action="store_true",
+                        help="Disable the per-patch depth scale/offset alignment over overlap "
+                             "bands before stitching (leaves seam depth steps in the map).")
     parser.add_argument("--no_surfel", action="store_true",
                         help="Disable the slope-aware anisotropic (surfel) initialization and "
                              "fall back to isotropic splats sized from the horizontal grid "
@@ -469,6 +500,9 @@ if __name__ == "__main__":
         upscale_factor=args.upscale_factor,
         splat_scale=args.splat_scale,
         surfel_init=not args.no_surfel,
+        relief=args.relief,
+        densify_views=args.densify_views,
+        align_depth=not args.no_align_depth,
         reference_cond=args.reference_cond,
         reference_spread=args.reference_spread,
         latent_vector=latent_vec,

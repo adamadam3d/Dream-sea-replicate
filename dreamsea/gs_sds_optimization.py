@@ -64,6 +64,38 @@ class GaussianSplattingModel(nn.Module):
         else:
             self.point_conds = torch.zeros((N, 2), dtype=torch.float32, requires_grad=False).to(self.device)
 
+    @torch.no_grad()
+    def add_gaussians(self, positions, colors01, scales, quats, opacity_logit=5.0, conds=None):
+        """
+        Appends new Gaussians (hole densification). Must be called BEFORE an
+        optimizer is built over the parameters — nn.Parameters are re-created.
+
+        positions: (M, 3) world positions;  colors01: (M, 3) in [0, 1];
+        scales: (M, 3) linear scales;       quats: (M, 4) wxyz unit quaternions.
+        """
+        dev = self.device
+        pos = torch.as_tensor(np.asarray(positions), dtype=torch.float32, device=dev)
+        col = torch.as_tensor(np.asarray(colors01), dtype=torch.float32, device=dev)
+        scl = torch.clamp(torch.as_tensor(np.asarray(scales), dtype=torch.float32, device=dev), min=1e-6)
+        qts = torch.as_tensor(np.asarray(quats), dtype=torch.float32, device=dev)
+        M = pos.shape[0]
+        if M == 0:
+            return
+
+        self.positions = torch.cat([self.positions, pos], dim=0)
+        self.scaling = nn.Parameter(torch.cat([self.scaling.data, torch.log(scl)], dim=0))
+        self.rotation = nn.Parameter(torch.cat([self.rotation.data, qts], dim=0))
+        self.opacity = nn.Parameter(torch.cat(
+            [self.opacity.data, torch.full((M, 1), opacity_logit, dtype=torch.float32, device=dev)], dim=0))
+        feat = torch.arctanh(torch.clamp(col * 2.0 - 1.0, -0.999, 0.999))
+        self.features_dc = nn.Parameter(torch.cat([self.features_dc.data, feat], dim=0))
+
+        if conds is None:
+            conds = torch.zeros((M, self.point_conds.shape[1]), dtype=torch.float32, device=dev)
+        else:
+            conds = torch.as_tensor(np.asarray(conds), dtype=torch.float32, device=dev)
+        self.point_conds = torch.cat([self.point_conds, conds], dim=0)
+
     def forward(self, camera=None, canvas_size=224):
         """
         Differentiable top-down orthographic projection onto a (1, 4, H, W) RGBD canvas.
@@ -112,12 +144,16 @@ class GaussianSplattingModel(nn.Module):
 
         return rendered.view(4, canvas_size, canvas_size).unsqueeze(0)  # (1, 4, H, W)
 
-def _unproject_grid(rgbd_map, fov=60.0):
+def _unproject_grid(rgbd_map, fov=60.0, relief=10.0):
     """
     Unprojects a stitched RGBD map into an (H, W, 3) grid of 3D positions plus
     the (H, W, 3) RGB grid. Accepts values in [0, 1] or [-1, 1] (auto-detected).
     Single source of truth for the pinhole geometry shared by
     create_point_cloud_from_rgbd and compute_surfel_init.
+
+    relief: multiplier mapping the [0, 1] depth channel to world z-range
+    (z = depth * relief + 1). Higher = more vertical exaggeration = steeper
+    slopes, which directly increases pinhole risk in the splat cloud.
     """
     C, H, W = rgbd_map.shape
 
@@ -138,7 +174,7 @@ def _unproject_grid(rgbd_map, fov=60.0):
     y = y.astype(np.float32)
 
     # Unproject
-    z = depth * 10.0 + 1.0 # arbitrary scaling to move away from camera
+    z = depth * relief + 1.0 # scale relief and move away from camera
     x_3d = (x - cx) * z / focal
     y_3d = (y - cy) * z / focal
 
@@ -192,7 +228,7 @@ def _rotmat_to_quat_wxyz(R):
     return q
 
 
-def compute_surfel_init(rgbd_map, fov=60.0, splat_scale=0.75, normal_thickness=0.1):
+def compute_surfel_init(rgbd_map, fov=60.0, splat_scale=0.75, normal_thickness=0.1, relief=10.0):
     """
     Slope-aware anisotropic (surfel) initialization from the RGBD grid.
 
@@ -207,7 +243,7 @@ def compute_surfel_init(rgbd_map, fov=60.0, splat_scale=0.75, normal_thickness=0
     Returns (scales, quats): (N, 3) linear scales and (N, 4) wxyz quaternions,
     flattened with the same z > 0.1 validity mask as create_point_cloud_from_rgbd.
     """
-    pos, _, _, _ = _unproject_grid(rgbd_map, fov)
+    pos, _, _, _ = _unproject_grid(rgbd_map, fov, relief=relief)
     H, W, _ = pos.shape
 
     # 3D deltas to the right / down neighbors, edge-replicated on the last row/col
@@ -244,13 +280,14 @@ def compute_surfel_init(rgbd_map, fov=60.0, splat_scale=0.75, normal_thickness=0
     return scales[valid].astype(np.float32), quats[valid]
 
 
-def create_point_cloud_from_rgbd(rgbd_map, fov=60.0, latent_grid=None, patch_size=224, overlap_size=32):
+def create_point_cloud_from_rgbd(rgbd_map, fov=60.0, latent_grid=None, patch_size=224, overlap_size=32,
+                                 relief=10.0):
     """
     Converts a stitched RGBD map into a 3D point cloud and optionally retrieves the DINO/PCA conditioning vectors per-point.
     rgbd_map: (4, H, W) numpy array, channels are RGB + Depth.
     Accepts values in either [0, 1] or [-1, 1] range (auto-detected).
     """
-    pos_grid, rgb, x, y = _unproject_grid(rgbd_map, fov)
+    pos_grid, rgb, x, y = _unproject_grid(rgbd_map, fov, relief=relief)
     z = pos_grid[..., 2]
 
     positions = pos_grid.reshape(-1, 3)
