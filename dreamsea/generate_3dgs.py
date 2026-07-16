@@ -45,7 +45,8 @@ def generate_3dgs(cond_ckpt, uncond_ckpt, grid_size=3, roughness=0.5,
                   sds_rgbd=False, sds_anchor=1.0,
                   latent_stats_path=None, use_conditional_stitching=False,
                   rasterizer="gsplat", save_init_ply=False, upscale_factor=1.0,
-                  splat_scale=0.75, reference_cond=None, reference_spread=1.0,
+                  splat_scale=0.75, surfel_init=True,
+                  reference_cond=None, reference_spread=1.0,
                   latent_vector=None, sr_ckpt=None, sr_factor=4, sr_steps=100,
                   sr_color_correct=True, sr_color_strength=1.0,
                   patch_size=224, redilate=False, redilation_fraction=0.5,
@@ -263,10 +264,20 @@ def generate_3dgs(cond_ckpt, uncond_ckpt, grid_size=3, roughness=0.5,
     focal = 0.5 * global_map.shape[2] / np.tan(np.radians(60.0) / 2.0)
     point_spacing = positions[:, 2] / focal
 
+    # Slope-aware anisotropic (surfel) init: disc Gaussians aligned to the local
+    # surface, sized to the true 3D neighbor gaps — fills the pinholes that
+    # isotropic splats leave on steep slopes without blurring flat terrain.
+    init_scales, init_quats = (None, None)
+    if surfel_init:
+        init_scales, init_quats = gs_opt.compute_surfel_init(global_map, splat_scale=splat_scale)
+        print("Using surfel (slope-aware anisotropic) initialization.")
+
     gs_model = gs_opt.GaussianSplattingModel(positions, colors, point_cloud_conds=conds,
                                              upscale_factor=upscale_factor,
                                              point_spacing=point_spacing,
-                                             splat_scale=splat_scale, device=device)
+                                             splat_scale=splat_scale,
+                                             init_scales=init_scales, init_quats=init_quats,
+                                             device=device)
     print("3DGS model initialized.")
 
     # Save initial PLY before SDS optimization if requested
@@ -405,6 +416,10 @@ if __name__ == "__main__":
                              "Lower = sharper texture (risk of pinholes on steep slopes), "
                              "higher = smoother/safer coverage. 0.75 keeps the surface "
                              "hole-free without blurring the RGBD map.")
+    parser.add_argument("--no_surfel", action="store_true",
+                        help="Disable the slope-aware anisotropic (surfel) initialization and "
+                             "fall back to isotropic splats sized from the horizontal grid "
+                             "spacing (the old behavior; pinholes on steep slopes).")
     parser.add_argument("-R", "--reference_cond", type=str, default=None,
                         help="Path to a preprocessed condition file (conditions/<name>_cond.pt) from "
                              "preprocess_dataset.py. Centers the whole generation on that sample's 2D "
@@ -453,6 +468,7 @@ if __name__ == "__main__":
         save_init_ply=args.save_init_ply,
         upscale_factor=args.upscale_factor,
         splat_scale=args.splat_scale,
+        surfel_init=not args.no_surfel,
         reference_cond=args.reference_cond,
         reference_spread=args.reference_spread,
         latent_vector=latent_vec,

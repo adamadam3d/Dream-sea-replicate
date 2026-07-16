@@ -4,7 +4,8 @@ import numpy as np
 
 class GaussianSplattingModel(nn.Module):
     def __init__(self, point_cloud_positions, point_cloud_colors, point_cloud_conds=None, upscale_factor=1.0,
-                 point_spacing=None, splat_scale=0.75, device='cuda' if torch.cuda.is_available() else 'cpu'):
+                 point_spacing=None, splat_scale=0.75, init_scales=None, init_quats=None,
+                 device='cuda' if torch.cuda.is_available() else 'cpu'):
         super().__init__()
         self.device = device
         # Freeze 3D positions to prevent memory overflow
@@ -16,7 +17,14 @@ class GaussianSplattingModel(nn.Module):
         # Covariance represented via scaling and rotation (quaternions)
         # Log-space scaling is used here for stability in optimization
         z_vals = self.positions[:, 2:3].detach()
-        if point_spacing is not None:
+        if init_scales is not None:
+            # Surfel-style anisotropic init (compute_surfel_init): per-point
+            # linear scales already sized to the true 3D neighbor distances,
+            # so steep slopes get elongated splats instead of pinholes.
+            base_scale = torch.as_tensor(np.asarray(init_scales), dtype=torch.float32).to(self.device)
+            base_scale = torch.clamp(base_scale, min=1e-6)
+            self.scaling = nn.Parameter(torch.log(base_scale))
+        elif point_spacing is not None:
             # σ tied to the actual inter-point spacing of the unprojected grid, so
             # sharpness is independent of map resolution. ~0.75x spacing overlaps
             # enough to stay hole-free without acting as a low-pass filter. (The
@@ -24,15 +32,20 @@ class GaussianSplattingModel(nn.Module):
             # spacing for a 3x3 grid — blurring away the RGBD map's texture.)
             spacing = torch.as_tensor(np.asarray(point_spacing), dtype=torch.float32).view(-1, 1).to(self.device)
             base_scale = torch.clamp(spacing * splat_scale, min=1e-6)
+            self.scaling = nn.Parameter(torch.log(base_scale.repeat(1, 3)))
         else:
             # Legacy depth-proportional heuristic for callers that don't know the
             # unprojection focal length; resolution-dependent and blurry for
             # multi-patch maps.
             base_scale = torch.clamp(z_vals / (80.0 * upscale_factor), min=0.01 / upscale_factor)
-        self.scaling = nn.Parameter(torch.log(base_scale.repeat(1, 3)))
-        
-        self.rotation = nn.Parameter(torch.zeros((N, 4), dtype=torch.float32).to(self.device))
-        self.rotation.data[:, 0] = 1.0 # Initialize real part of quaternion to 1
+            self.scaling = nn.Parameter(torch.log(base_scale.repeat(1, 3)))
+
+        if init_quats is not None:
+            quats = torch.as_tensor(np.asarray(init_quats), dtype=torch.float32).to(self.device)
+            self.rotation = nn.Parameter(quats)
+        else:
+            self.rotation = nn.Parameter(torch.zeros((N, 4), dtype=torch.float32).to(self.device))
+            self.rotation.data[:, 0] = 1.0 # Initialize real part of quaternion to 1
 
         # Opacity
         # Initialize to 5.0 so that sigmoid(5.0) = 0.993 (fully opaque for solid reconstruction)
@@ -99,11 +112,12 @@ class GaussianSplattingModel(nn.Module):
 
         return rendered.view(4, canvas_size, canvas_size).unsqueeze(0)  # (1, 4, H, W)
 
-def create_point_cloud_from_rgbd(rgbd_map, fov=60.0, latent_grid=None, patch_size=224, overlap_size=32):
+def _unproject_grid(rgbd_map, fov=60.0):
     """
-    Converts a stitched RGBD map into a 3D point cloud and optionally retrieves the DINO/PCA conditioning vectors per-point.
-    rgbd_map: (4, H, W) numpy array, channels are RGB + Depth.
-    Accepts values in either [0, 1] or [-1, 1] range (auto-detected).
+    Unprojects a stitched RGBD map into an (H, W, 3) grid of 3D positions plus
+    the (H, W, 3) RGB grid. Accepts values in [0, 1] or [-1, 1] (auto-detected).
+    Single source of truth for the pinhole geometry shared by
+    create_point_cloud_from_rgbd and compute_surfel_init.
     """
     C, H, W = rgbd_map.shape
 
@@ -128,7 +142,118 @@ def create_point_cloud_from_rgbd(rgbd_map, fov=60.0, latent_grid=None, patch_siz
     x_3d = (x - cx) * z / focal
     y_3d = (y - cy) * z / focal
 
-    positions = np.stack([x_3d, y_3d, z], axis=-1).reshape(-1, 3)
+    pos_grid = np.stack([x_3d, y_3d, z], axis=-1).astype(np.float32) # (H, W, 3)
+    return pos_grid, rgb, x, y
+
+
+def _rotmat_to_quat_wxyz(R):
+    """
+    Vectorized rotation-matrix -> quaternion (w, x, y, z). R: (N, 3, 3) with
+    the Gaussian's local axes as COLUMNS. Shepperd's method: pick the most
+    numerically stable of the four branches per element.
+    """
+    m00, m01, m02 = R[:, 0, 0], R[:, 0, 1], R[:, 0, 2]
+    m10, m11, m12 = R[:, 1, 0], R[:, 1, 1], R[:, 1, 2]
+    m20, m21, m22 = R[:, 2, 0], R[:, 2, 1], R[:, 2, 2]
+    N = R.shape[0]
+    q = np.zeros((N, 4), dtype=np.float32)
+
+    trace = m00 + m11 + m22
+    c0 = trace > 0.0
+    c1 = (~c0) & (m00 >= m11) & (m00 >= m22)
+    c2 = (~c0) & (~c1) & (m11 >= m22)
+    c3 = ~(c0 | c1 | c2)
+
+    s = np.sqrt(np.maximum(trace[c0] + 1.0, 1e-12)) * 2.0
+    q[c0, 0] = 0.25 * s
+    q[c0, 1] = (m21[c0] - m12[c0]) / s
+    q[c0, 2] = (m02[c0] - m20[c0]) / s
+    q[c0, 3] = (m10[c0] - m01[c0]) / s
+
+    s = np.sqrt(np.maximum(1.0 + m00[c1] - m11[c1] - m22[c1], 1e-12)) * 2.0
+    q[c1, 0] = (m21[c1] - m12[c1]) / s
+    q[c1, 1] = 0.25 * s
+    q[c1, 2] = (m01[c1] + m10[c1]) / s
+    q[c1, 3] = (m02[c1] + m20[c1]) / s
+
+    s = np.sqrt(np.maximum(1.0 + m11[c2] - m00[c2] - m22[c2], 1e-12)) * 2.0
+    q[c2, 0] = (m02[c2] - m20[c2]) / s
+    q[c2, 1] = (m01[c2] + m10[c2]) / s
+    q[c2, 2] = 0.25 * s
+    q[c2, 3] = (m12[c2] + m21[c2]) / s
+
+    s = np.sqrt(np.maximum(1.0 + m22[c3] - m00[c3] - m11[c3], 1e-12)) * 2.0
+    q[c3, 0] = (m10[c3] - m01[c3]) / s
+    q[c3, 1] = (m02[c3] + m20[c3]) / s
+    q[c3, 2] = (m12[c3] + m21[c3]) / s
+    q[c3, 3] = 0.25 * s
+
+    q /= np.maximum(np.linalg.norm(q, axis=1, keepdims=True), 1e-12)
+    return q
+
+
+def compute_surfel_init(rgbd_map, fov=60.0, splat_scale=0.75, normal_thickness=0.1):
+    """
+    Slope-aware anisotropic (surfel) initialization from the RGBD grid.
+
+    Isotropic splats sized to the horizontal pixel spacing leave pinholes on
+    steep slopes: horizontally-adjacent pixels unproject ~spacing/cos(slope)
+    apart in 3D, and at depth edges the gap is dominated by the depth jump
+    itself. Instead, each Gaussian becomes a flat disc aligned to the local
+    surface, with in-plane axes sized to the TRUE 3D distances to the right and
+    down neighbors — flat terrain stays as sharp as the isotropic init while
+    slopes get exactly the extra coverage they need.
+
+    Returns (scales, quats): (N, 3) linear scales and (N, 4) wxyz quaternions,
+    flattened with the same z > 0.1 validity mask as create_point_cloud_from_rgbd.
+    """
+    pos, _, _, _ = _unproject_grid(rgbd_map, fov)
+    H, W, _ = pos.shape
+
+    # 3D deltas to the right / down neighbors, edge-replicated on the last row/col
+    dx = np.empty_like(pos)
+    dx[:, :-1] = pos[:, 1:] - pos[:, :-1]
+    dx[:, -1] = dx[:, -2]
+    dy = np.empty_like(pos)
+    dy[:-1, :] = pos[1:, :] - pos[:-1, :]
+    dy[-1, :] = dy[-2, :]
+
+    len_x = np.maximum(np.linalg.norm(dx, axis=-1, keepdims=True), 1e-8)
+    len_y = np.maximum(np.linalg.norm(dy, axis=-1, keepdims=True), 1e-8)
+
+    # Local tangent frame: t1 along the row direction, n the surface normal
+    # (flipped to face the camera at the origin), t2 completes the basis.
+    t1 = dx / len_x
+    n = np.cross(dx, dy)
+    n /= np.maximum(np.linalg.norm(n, axis=-1, keepdims=True), 1e-8)
+    n = np.where(n[..., 2:3] > 0.0, -n, n)
+    t2 = np.cross(n, t1)
+    t2 /= np.maximum(np.linalg.norm(t2, axis=-1, keepdims=True), 1e-8)
+
+    # Disc scales: cover the true neighbor gaps in-plane, stay thin along the normal
+    s1 = splat_scale * len_x
+    s2 = splat_scale * len_y
+    s3 = normal_thickness * splat_scale * np.minimum(len_x, len_y)
+    scales = np.concatenate([s1, s2, s3], axis=-1).reshape(-1, 3)
+
+    # Rotation matrices with local axes as columns: [t1 | t2 | n]
+    R = np.stack([t1.reshape(-1, 3), t2.reshape(-1, 3), n.reshape(-1, 3)], axis=-1)
+    quats = _rotmat_to_quat_wxyz(R.astype(np.float32))
+
+    valid = pos[..., 2].flatten() > 0.1
+    return scales[valid].astype(np.float32), quats[valid]
+
+
+def create_point_cloud_from_rgbd(rgbd_map, fov=60.0, latent_grid=None, patch_size=224, overlap_size=32):
+    """
+    Converts a stitched RGBD map into a 3D point cloud and optionally retrieves the DINO/PCA conditioning vectors per-point.
+    rgbd_map: (4, H, W) numpy array, channels are RGB + Depth.
+    Accepts values in either [0, 1] or [-1, 1] range (auto-detected).
+    """
+    pos_grid, rgb, x, y = _unproject_grid(rgbd_map, fov)
+    z = pos_grid[..., 2]
+
+    positions = pos_grid.reshape(-1, 3)
     colors = rgb.reshape(-1, 3)
 
     # Filter invalid depths
