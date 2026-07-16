@@ -144,6 +144,90 @@ class GaussianSplattingModel(nn.Module):
 
         return rendered.view(4, canvas_size, canvas_size).unsqueeze(0)  # (1, 4, H, W)
 
+def _box_mean(a, r):
+    """Mean over the (2r+1)^2 window via integral image, edge-clamped counts.
+    a: (H, W) float array."""
+    H, W = a.shape
+    c = np.cumsum(np.cumsum(a.astype(np.float64), axis=0), axis=1)
+    c = np.pad(c, ((1, 0), (1, 0)))
+    y0 = np.clip(np.arange(H) - r, 0, H)
+    y1 = np.clip(np.arange(H) + r + 1, 0, H)
+    x0 = np.clip(np.arange(W) - r, 0, W)
+    x1 = np.clip(np.arange(W) + r + 1, 0, W)
+    S = c[y1][:, x1] - c[y0][:, x1] - c[y1][:, x0] + c[y0][:, x0]
+    cnt = (y1 - y0)[:, None] * (x1 - x0)[None, :]
+    return (S / cnt).astype(np.float32)
+
+
+def guided_filter_depth(rgbd_map, radius=8, eps=2e-3):
+    """
+    Edge-aware denoise of the depth channel, guided by the RGB luminance
+    (He et al. guided filter). DDPM-generated depth carries per-pixel speckle
+    that unprojects into noisy surfel normals and micro-gaps; this smooths the
+    speckle while keeping depth edges that coincide with image structure.
+
+    rgbd_map: (4, H, W), values in [0, 1] or [-1, 1] (auto-detected).
+    Returns a filtered copy in the same value range.
+    """
+    out = rgbd_map.copy()
+    signed = rgbd_map.min() < -0.5
+    if signed:
+        g = (rgbd_map[:3].mean(axis=0) + 1.0) / 2.0
+        p = (rgbd_map[3] + 1.0) / 2.0
+    else:
+        g = rgbd_map[:3].mean(axis=0)
+        p = rgbd_map[3]
+
+    r = max(int(radius), 1)
+    mg = _box_mean(g, r)
+    mp = _box_mean(p, r)
+    vg = _box_mean(g * g, r) - mg * mg
+    cgp = _box_mean(g * p, r) - mg * mp
+    a = cgp / (vg + eps)
+    b = mp - a * mg
+    q = _box_mean(a, r) * g + _box_mean(b, r)
+    q = np.clip(q, 0.0, 1.0)
+
+    out[3] = q * 2.0 - 1.0 if signed else q
+    return out
+
+
+def auto_relief(rgbd_map, fov=60.0, max_slope_deg=60.0, relief_cap=10.0, relief_floor=0.5):
+    """
+    Choose the vertical relief multiplier from the map's own slope statistics:
+    the largest relief for which the 95th-percentile surface slope stays under
+    max_slope_deg. A fixed relief renders wildly different steepness depending
+    on how stretched the generated depth histogram is; this normalizes that.
+
+    Model: height change per pixel = relief * |grad d|, horizontal pixel size
+    = z_mean / focal with z_mean = relief * d_mean + 1, so
+      tan(theta) = relief * G * focal / (relief * d_mean + 1),  G = p95(|grad d|)
+    solved for relief. Slope statistics are measured at ~224px map scale so the
+    choice is independent of SR/upscale factor.
+    """
+    rgbd = rgbd_map
+    if rgbd.min() < -0.5:
+        rgbd = (rgbd + 1.0) / 2.0
+    d = np.clip(rgbd[3], 0.0, 1.0).astype(np.float32)
+
+    # Pool to ~224 so per-pixel gradients measure terrain slopes, not SR-scale speckle
+    k = max(1, int(round(min(d.shape) / 224.0)))
+    if k > 1:
+        H, W = d.shape
+        d = d[:H - H % k, :W - W % k].reshape(H // k, k, W // k, k).mean(axis=(1, 3))
+
+    gy, gx = np.gradient(d)
+    G = float(np.percentile(np.sqrt(gx * gx + gy * gy), 95.0))
+    focal = 0.5 * d.shape[1] / np.tan(0.5 * np.radians(fov))
+    d_mean = float(d.mean())
+    T = float(np.tan(np.radians(max_slope_deg)))
+
+    denom = G * focal - T * d_mean
+    if denom <= 1e-9:
+        return float(relief_cap)  # even max relief stays under the slope target
+    return float(np.clip(T / denom, relief_floor, relief_cap))
+
+
 def _unproject_grid(rgbd_map, fov=60.0, relief=10.0):
     """
     Unprojects a stitched RGBD map into an (H, W, 3) grid of 3D positions plus

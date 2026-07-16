@@ -45,7 +45,8 @@ def generate_3dgs(cond_ckpt, uncond_ckpt, grid_size=3, roughness=0.5,
                   sds_rgbd=False, sds_anchor=1.0,
                   latent_stats_path=None, use_conditional_stitching=False,
                   rasterizer="gsplat", save_init_ply=False, upscale_factor=1.0,
-                  splat_scale=0.75, surfel_init=True, relief=10.0,
+                  splat_scale=0.75, surfel_init=True, relief=None, max_slope_deg=60.0,
+                  depth_filter=8, depth_filter_eps=2e-3,
                   densify_views=30, align_depth=True,
                   reference_cond=None, reference_spread=1.0,
                   latent_vector=None, sr_ckpt=None, sr_factor=4, sr_steps=100,
@@ -214,6 +215,16 @@ def generate_3dgs(cond_ckpt, uncond_ckpt, grid_size=3, roughness=0.5,
         print(f"Upscaled global RGBD map from {global_tensor.shape[2]}x{global_tensor.shape[3]} "
               f"to {new_H}x{new_W} (factor: {upscale_factor})")
 
+    # Edge-aware denoise of the generated depth, guided by the RGB. The DDPM (and
+    # the SR stage) leave per-pixel speckle in the depth channel that unprojects
+    # into noisy surfel normals and micro-gaps; the guided filter removes it while
+    # keeping depth edges that coincide with image structure. Runs after SR so it
+    # cleans the map that is actually lifted.
+    if depth_filter > 0:
+        global_map = gs_opt.guided_filter_depth(global_map, radius=depth_filter,
+                                                eps=depth_filter_eps)
+        print(f"Applied RGB-guided depth filter (radius={depth_filter}, eps={depth_filter_eps}).")
+
     # Save the global RGB and Depth map collage as a PNG image
     from PIL import Image
     rgb_map_path = os.path.join(output_dir, f"{run_name}_rgb_map.png")
@@ -248,6 +259,13 @@ def generate_3dgs(cond_ckpt, uncond_ckpt, grid_size=3, roughness=0.5,
 
     # 4. Initialize 3D Gaussian Splatting
     print("\n--- 4. Initializing 3D Gaussian Splatting ---")
+    # A fixed relief renders very different steepness depending on how stretched
+    # this particular map's depth histogram came out; auto mode picks the relief
+    # that holds the 95th-percentile slope at max_slope_deg instead.
+    if relief is None:
+        relief = gs_opt.auto_relief(global_map, max_slope_deg=max_slope_deg)
+        print(f"Auto relief = {relief:.2f} (p95 slope target {max_slope_deg} deg).")
+
     positions, colors, conds = gs_opt.create_point_cloud_from_rgbd(
         global_map,
         latent_grid=latent_grid,
@@ -435,10 +453,23 @@ if __name__ == "__main__":
                              "Lower = sharper texture (risk of pinholes on steep slopes), "
                              "higher = smoother/safer coverage. 0.75 keeps the surface "
                              "hole-free without blurring the RGBD map.")
-    parser.add_argument("--relief", type=float, default=10.0,
+    parser.add_argument("--relief", type=float, default=None,
                         help="Vertical relief multiplier mapping the [0,1] depth channel to world "
-                             "z (z = depth*relief + 1). The historical value is 10; lower values "
-                             "(3-5) give gentler slopes and markedly fewer pinholes.")
+                             "z (z = depth*relief + 1). Omit for AUTO: the relief is chosen from "
+                             "the map's own slope statistics via --max_slope_deg, so scenes render "
+                             "at comparable steepness however stretched their depth histogram is. "
+                             "The historical fixed value is 10; lower values (3-5) give gentler "
+                             "slopes and markedly fewer pinholes.")
+    parser.add_argument("--max_slope_deg", type=float, default=60.0,
+                        help="Auto-relief target: the largest relief whose 95th-percentile surface "
+                             "slope stays under this angle. Ignored when --relief is given.")
+    parser.add_argument("--depth_filter", type=int, default=8,
+                        help="Radius of the RGB-guided edge-aware filter applied to the generated "
+                             "depth channel before unprojection (removes DDPM/SR speckle that "
+                             "becomes noisy surfel normals and micro-gaps). 0 disables.")
+    parser.add_argument("--depth_filter_eps", type=float, default=2e-3,
+                        help="Guided-filter regularization. Larger = smoother (edges guided less "
+                             "strongly by RGB); smaller = follows RGB structure more sharply.")
     parser.add_argument("--densify_views", type=int, default=30,
                         help="Number of random near-nadir views for alpha-driven hole "
                              "densification (SplaTAM-style: insert Gaussians wherever interior "
@@ -501,6 +532,9 @@ if __name__ == "__main__":
         splat_scale=args.splat_scale,
         surfel_init=not args.no_surfel,
         relief=args.relief,
+        max_slope_deg=args.max_slope_deg,
+        depth_filter=args.depth_filter,
+        depth_filter_eps=args.depth_filter_eps,
         densify_views=args.densify_views,
         align_depth=not args.no_align_depth,
         reference_cond=args.reference_cond,
